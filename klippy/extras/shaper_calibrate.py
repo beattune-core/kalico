@@ -274,6 +274,7 @@ class ShaperCalibrate:
 
         damping_ratio = damping_ratio or shaper_defs.DEFAULT_DAMPING_RATIO
         test_damping_ratios = test_damping_ratios or TEST_DAMPING_RATIOS
+        scv = scv or 5.0
 
         if not shaper_freqs:
             shaper_freqs = (None, None, None)
