@@ -15,6 +15,8 @@ MIN_FREQ = 5.0
 MAX_FREQ = 200.0
 WINDOW_T_SEC = 0.5
 MAX_SHAPER_FREQ = 150.0
+SHAPER_FREQ_CEILING_STEP = 25.0
+SHAPER_FREQ_CEILING_TRIGGER = 2.0
 
 TEST_DAMPING_RATIOS = [0.075, 0.1, 0.15]
 
@@ -430,6 +432,72 @@ class ShaperCalibrate:
                 # Either the shaper significantly improves the score (by 20%),
                 # or it improves the score and smoothing (by 5% and 10% resp.)
                 best_shaper = shaper
+        # If the best frequency is near the scan ceiling, the true resonance
+        # may be above it. Extend the ceiling in steps of SHAPER_FREQ_CEILING_STEP
+        # until the result no longer presses the limit or MAX_FREQ is reached.
+        # Skipped when the caller supplies an explicit shaper_freqs override.
+        current_ceiling = MAX_SHAPER_FREQ
+        while (
+            shaper_freqs is None
+            and best_shaper.freq
+            >= current_ceiling - SHAPER_FREQ_CEILING_TRIGGER
+            and current_ceiling < MAX_FREQ
+        ):
+            current_ceiling = min(
+                current_ceiling + SHAPER_FREQ_CEILING_STEP, MAX_FREQ
+            )
+            if logger is not None:
+                logger(
+                    "Shaper frequency near ceiling, extending to %.0f Hz"
+                    % (current_ceiling,)
+                )
+            best_shaper = None
+            all_shapers = []
+            for shaper_cfg in shaper_defs.INPUT_SHAPERS:
+                if shaper_cfg.name not in shapers:
+                    continue
+                shaper = self.background_process_exec(
+                    self.fit_shaper,
+                    (
+                        shaper_cfg,
+                        calibration_data,
+                        (None, current_ceiling, None),
+                        damping_ratio,
+                        scv,
+                        max_smoothing,
+                        test_damping_ratios,
+                        max_freq,
+                    ),
+                )
+                if logger is not None:
+                    logger(
+                        "Fitted shaper '%s' frequency = %.1f Hz "
+                        "(vibrations = %.1f%%, smoothing ~= %.3f)"
+                        % (
+                            shaper.name,
+                            shaper.freq,
+                            shaper.vibrs * 100.0,
+                            shaper.smoothing,
+                        )
+                    )
+                    logger(
+                        "To avoid too much smoothing with '%s', suggested "
+                        "max_accel <= %.0f mm/sec^2"
+                        % (
+                            shaper.name,
+                            round(shaper.max_accel / 100.0) * 100.0,
+                        )
+                    )
+                all_shapers.append(shaper)
+                if (
+                    best_shaper is None
+                    or shaper.score * 1.2 < best_shaper.score
+                    or (
+                        shaper.score * 1.05 < best_shaper.score
+                        and shaper.smoothing * 1.1 < best_shaper.smoothing
+                    )
+                ):
+                    best_shaper = shaper
         return best_shaper, all_shapers
 
     def save_params(self, configfile, axis, shaper_name, shaper_freq):
