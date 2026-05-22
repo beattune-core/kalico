@@ -18,6 +18,7 @@ klippy/plugins/*
 
 # docs
 site/
+docs/superpowers/
 .env/
 .venv/
 env/
