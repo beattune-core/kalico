@@ -45,7 +45,6 @@ class CFlap:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.full_name = config.get_name()
-        self.name = self.full_name.split()[-1]
 
         if config.get("endstop_pin", None) is None:
             raise config.error(
