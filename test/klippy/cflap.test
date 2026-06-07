@@ -1,0 +1,43 @@
+# cflap happy-path behavior
+CONFIG cflap.cfg
+DICTIONARY atmega2560.dict
+
+# Home the machine and the flap
+G28
+CFLAP_HOME
+M400
+
+# CFLAP_HOME marks homed and starts the blower at blower_power
+ASSERT TEST="{ printer.fan.homed == True }"
+ASSERT TEST="{ printer['fan_generic cflap_fan'].value == 0.8 }"
+
+# Flap fully open via the default slicer command (no P)
+M106 S255
+M400
+ASSERT TEST="{ printer.fan.value == 1.0 }"
+
+# Mid-print: interleave flap changes with motion (must not error/stall)
+G1 X20 Y20 Z1 F6000
+M106 S0
+G1 X40 Y40 F6000
+M106 S255
+G1 X60 Y20 F6000
+M400
+ASSERT TEST="{ printer.fan.value == 1.0 }"
+
+# M107 closes the flap but leaves the blower running
+M107
+M400
+ASSERT TEST="{ printer.fan.value == 0.0 }"
+ASSERT TEST="{ printer['fan_generic cflap_fan'].value == 0.8 }"
+
+# Manual blower control still works via P-routing
+M106 P3 S255
+M400
+ASSERT TEST="{ printer['fan_generic cflap_fan'].value == 1.0 }"
+
+# Teardown: park + disable + blower off
+CFLAP_DISABLE
+M400
+ASSERT TEST="{ printer['fan_generic cflap_fan'].value == 0.0 }"
+ASSERT TEST="{ printer.fan.homed == False }"

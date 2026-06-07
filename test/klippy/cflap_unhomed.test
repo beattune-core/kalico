@@ -1,0 +1,7 @@
+# A flap move before homing must raise an error.
+SHOULD_FAIL
+CONFIG cflap.cfg
+DICTIONARY atmega2560.dict
+
+G28
+M106 S128
