@@ -3974,6 +3974,16 @@ control: curve
 Flap controlled Cpap cooling.
 To define a TMC section for it, just add `[tmcXXXX cflap]` to your config and add the necessary configuration there.
 
+This section registers itself as the printer's `fan` object, and the flap
+satisfies the standard Klipper fan-speed contract (`set_speed` /
+`get_status()["speed"]`, both using the 0.0-1.0 convention). This makes
+it usable directly as an MPC heater profile's `cooling_fan` (see
+[MPC.md](MPC.md)): MPC drives the flap position through `set_speed` and
+reads it back through `get_status` to build its `fan_ambient_transfer`
+model. The blower is intentionally **not** part of this contract -- it
+is a constant PWM source (`blower_power`) so MPC's calibration measures
+heater behavior against a fixed, known baseline.
+
 ```
 [cflap]
 #step_pin:
