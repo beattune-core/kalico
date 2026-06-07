@@ -1,9 +1,47 @@
 import logging
 
-from . import pulse_counter, manual_stepper
+from . import pulse_counter, manual_stepper, force_move
 
 
-SAFETY_CHECK_INIT_TIME = 3.0
+FLAP_MIN_POS = 0.0
+FLAP_MAX_POS = 255.0
+
+
+def clamp_flap(value):
+    return max(FLAP_MIN_POS, min(FLAP_MAX_POS, value))
+
+
+def flap_target_from_s(s):
+    # M106 flap: S is a 0..255 position; default to full open if omitted.
+    if s is None:
+        s = FLAP_MAX_POS
+    return clamp_flap(s)
+
+
+def blower_power_from_s(s):
+    # Map M106 S (0..255) to a 0..1 PWM value; None means full power.
+    if s is None:
+        return 1.0
+    if s >= 255.0:
+        return 1.0
+    if s <= 0.0:
+        return 0.0
+    return round(s / 255.0, 10)
+
+
+def route_m106(p, s):
+    # Returns ("flap", target) or ("blower", power).
+    if p is None or p == 1:
+        return ("flap", flap_target_from_s(s))
+    return ("blower", blower_power_from_s(s))
+
+
+def route_m107(p):
+    # Returns "flap_close" or "blower_off".
+    if p is None or p == 1:
+        return "flap_close"
+    return "blower_off"
+
 
 class CFlap:
     def __init__(self, config):
