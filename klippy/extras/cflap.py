@@ -108,6 +108,18 @@ class CFlap:
         # means we do not dwell/drain the print queue (no stall).
         self.ms.do_move(target, speed, self.ms.accel, sync=False)
 
+    def set_speed(self, value, print_time=None):
+        # The standard Klipper fan-speed contract MPC requires of its
+        # cooling_fan (value is 0.0..1.0; see heaters.py/control_mpc.py).
+        # MPC calibration sweeps this to build its fan_ambient_transfer
+        # model against the flap position -- the quantity that actually
+        # meters airflow -- so this drives the flap, not the (now-static)
+        # blower. Reuses set_flap's homed-check + move path, so an
+        # unhomed call raises exactly like any other flap command.
+        # print_time is accepted for interface compatibility only:
+        # manual_stepper.do_move schedules its own move time.
+        self.set_flap(flap_target_from_speed(value))
+
     def close_flap(self, speed=None):
         # Closing an unhomed flap is a silent no-op (nothing to close).
         self._refresh_homed()

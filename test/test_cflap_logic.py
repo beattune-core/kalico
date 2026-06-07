@@ -49,3 +49,12 @@ def test_flap_target_from_speed_maps_unit_range_to_flap_position():
 def test_flap_target_from_speed_clamps():
     assert cflap.flap_target_from_speed(-0.5) == 0.0
     assert cflap.flap_target_from_speed(1.5) == 255.0
+
+
+def test_cflap_exposes_mpc_fan_speed_contract():
+    # heaters.py only accepts a cooling_fan if
+    # hasattr(fan_obj.fan, "set_speed") (klippy/extras/heaters.py:492-497).
+    # PrinterCFlapFan registers as "fan" and PrinterCFlapFan.fan is a
+    # CFlap instance, so CFlap itself must expose this method.
+    assert hasattr(cflap.CFlap, "set_speed")
+    assert callable(cflap.CFlap.set_speed)
