@@ -4,6 +4,11 @@ from . import pulse_counter, manual_stepper
 FLAP_MIN_POS = 0.0
 FLAP_MAX_POS = 255.0
 
+BLOWER_LOCKED_MSG = (
+    "Blower power is fixed via blower_power in config and cannot be"
+    " changed at runtime"
+)
+
 
 def clamp_flap(value):
     return max(FLAP_MIN_POS, min(FLAP_MAX_POS, value))
@@ -375,7 +380,7 @@ class PrinterCFlapFan:
         if kind == "flap":
             self.fan.set_flap(value, v)
         else:
-            self.fan.cflap_fan.set_speed_from_command(value)
+            raise self.fan.printer.command_error(BLOWER_LOCKED_MSG)
 
     def cmd_M107(self, gcmd):
         p = gcmd.get_int("P", None)
@@ -383,7 +388,7 @@ class PrinterCFlapFan:
         if route_m107(p) == "flap_close":
             self.fan.close_flap(v)
         else:
-            self.fan.cflap_fan.set_speed_from_command(0.0)
+            raise self.fan.printer.command_error(BLOWER_LOCKED_MSG)
 
     cmd_CFLAP_HOME_help = "Home the cflap flap and start the blower"
 
@@ -395,11 +400,12 @@ class PrinterCFlapFan:
     def cmd_CFLAP_DISABLE(self, gcmd):
         self.fan.do_disable()
 
-    cmd_SET_FAN_SPEED_help = "Sets the speed of a fan"
+    cmd_SET_FAN_SPEED_help = (
+        "Blower power is fixed via config; this command always errors"
+    )
 
     def cmd_SET_FAN_SPEED(self, gcmd):
-        speed = gcmd.get_float("SPEED", 0.0)
-        self.fan.cflap_fan.set_speed_from_command(speed)
+        raise self.fan.printer.command_error(BLOWER_LOCKED_MSG)
 
     cmd_CFLAP_SET_WINDUP_SPEED_help = "Sets the stepper speed for the cflap"
 

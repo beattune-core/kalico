@@ -1,0 +1,10 @@
+# Runtime blower PWM changes are locked: blower_power is fixed in config
+# (MPC calibration requires a constant, known air source).
+SHOULD_FAIL
+CONFIG cflap.cfg
+DICTIONARY atmega2560.dict
+
+G28
+CFLAP_HOME
+M400
+M106 P3 S128

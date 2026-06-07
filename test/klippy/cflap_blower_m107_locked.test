@@ -1,0 +1,9 @@
+# M107 P0 (manual blower-off) is locked for the same reason as M106 P3.
+SHOULD_FAIL
+CONFIG cflap.cfg
+DICTIONARY atmega2560.dict
+
+G28
+CFLAP_HOME
+M400
+M107 P0
