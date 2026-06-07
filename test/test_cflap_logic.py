@@ -38,3 +38,14 @@ def test_route_m107():
     assert cflap.route_m107(1) == "flap_close"
     assert cflap.route_m107(0) == "blower_off"
     assert cflap.route_m107(3) == "blower_off"
+
+
+def test_flap_target_from_speed_maps_unit_range_to_flap_position():
+    assert cflap.flap_target_from_speed(0.0) == 0.0
+    assert cflap.flap_target_from_speed(1.0) == 255.0
+    assert cflap.flap_target_from_speed(0.5) == 127.5
+
+
+def test_flap_target_from_speed_clamps():
+    assert cflap.flap_target_from_speed(-0.5) == 0.0
+    assert cflap.flap_target_from_speed(1.5) == 255.0

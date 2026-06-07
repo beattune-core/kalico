@@ -27,6 +27,14 @@ def blower_power_from_s(s):
     return round(s / 255.0, 10)
 
 
+def flap_target_from_speed(value):
+    # MPC's cooling_fan.set_speed() convention: value is 0.0..1.0 (the
+    # standard Klipper fan-speed range -- see heaters.py / control_mpc.py).
+    # Map it onto the flap's 0..255 position range, the quantity MPC
+    # actually profiles against (the inverse of get_status()["speed"]).
+    return clamp_flap(value * FLAP_MAX_POS)
+
+
 def route_m106(p, s):
     # Returns ("flap", target) or ("blower", power).
     if p is None or p == 1:
