@@ -3976,8 +3976,30 @@ To define a TMC section for it, just add `[tmcXXXX cflap]` to your config and ad
 
 ```
 [cflap]
+#step_pin:
+#dir_pin:
+#enable_pin:
+#   Step/dir/enable pins for the flap stepper. Standard stepper pin
+#   options (microsteps, rotation_distance, etc.) also apply. Required.
+#endstop_pin:
+#   Endstop pin used to home the flap. REQUIRED - the flap must be
+#   homeable (run CFLAP_HOME before commanding flap moves).
+#velocity: 5.0
+#   Default flap move (windup) speed.
+#accel: 0.0
+#   Flap move acceleration. 0 means constant-velocity moves.
+#homing_speed: 30
+#   Speed used for the CFLAP_HOME homing move.
+#ignore_trigger: False
+#   If True, the homing move does not require the endstop to trigger.
+#disable_position: 0
+#   Flap position (0..255) to park at on CFLAP_DISABLE before the motor
+#   is disabled.
+#blower_power: 0.0
+#   Constant blower PWM value (0.0..1.0) applied when CFLAP_HOME runs;
+#   set to 0 on CFLAP_DISABLE. The blower is off at startup.
 pin:
-#   Output pin controlling the fan. This parameter must be provided.
+#   Output pin controlling the blower fan. This parameter must be provided.
 #max_power: 1.0
 #   The maximum power (0.0 to 1.0) that the pin may be set to. A value
 #   of 1.0 enables the pin fully for extended periods, while 0.5 allows

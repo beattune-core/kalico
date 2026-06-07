@@ -616,19 +616,33 @@ The following command is available when a
 [cflap config section](Config_Reference.md#cflap) is
 enabled.
 
+### CFLAP_HOME
+`CFLAP_HOME` Homes the flap against its endstop, sets the flap position to
+0 (closed), keeps the stepper enabled, and starts the blower at the
+configured `blower_power`. A flap move commanded before homing raises an
+error. Call this from your PRINT_START macro.
+
+### CFLAP_DISABLE
+`CFLAP_DISABLE` Parks the flap at `disable_position`, disables the flap
+stepper, and stops the blower. The flap must be re-homed (CFLAP_HOME)
+before it will move again.
+
 ### M106
 `M106 P<1|3> S<0-255> V<stepper speed>`
 P specifies what is controlled:
-    - if P is 1 or not defined, the flap will move to the position specified by S
-    - if P is 3, the fan will be controlled
-V defaults to the windup speed in the config
+    - if P is 1 or not defined, the flap moves to the position given by S
+      (the default `M106 S<value>` slicer command drives the flap)
+    - if P is 3 (or 0), the blower PWM is set
+V defaults to the windup speed in the config. A flap move before homing
+raises an error.
 
 ### M107
 `M107 P<1|3> V<stepper speed>`
 P specifies what is controlled:
-    - if P is 1 or not defined, the flap will be closed
-    - if P is 3, the fan will be controlled
-V defaults to the windup speed in the config
+    - if P is 1 or not defined, the flap is closed (the blower keeps
+      running; the stepper stays enabled)
+    - if P is 3 (or 0), the blower is turned off
+V defaults to the windup speed in the config.
 
 #### SET_FAN_SPEED
 `SET_FAN_SPEED FAN=CFLAP_FAN SPEED=<speed>` This command sets the
