@@ -1,6 +1,4 @@
-import logging
-
-from . import pulse_counter, manual_stepper, force_move
+from . import pulse_counter, manual_stepper
 
 
 FLAP_MIN_POS = 0.0
@@ -45,107 +43,115 @@ def route_m107(p):
 
 class CFlap:
     def __init__(self, config):
-        self.config = config
+        self.printer = config.get_printer()
         self.full_name = config.get_name()
         self.name = self.full_name.split()[-1]
-        self.printer = config.get_printer()
+
+        if config.get("endstop_pin", None) is None:
+            raise config.error(
+                "[%s] requires an endstop_pin so the flap can be homed"
+                % (self.full_name,)
+            )
+
         self.stepper_enable = self.printer.load_object(config, "stepper_enable")
         self.cflap_fan = CFlapFan(config, default_shutdown_speed=1.0)
-        self.stepper = manual_stepper.ManualStepper(config)
+        self.ms = manual_stepper.ManualStepper(config)
+        self.stepper_name = self.ms.steppers[0].get_name()
+
         self.toolhead = None
+        self.homed = False
+
+        self.windup_speed = self.ms.velocity
+        self.homing_speed = config.getfloat("homing_speed", 30, above=0.0)
+        self.ignore_trigger = config.getboolean("ignore_trigger", False)
+        self.disable_position = config.getfloat(
+            "disable_position", 0, minval=0.0, maxval=255.0
+        )
+        self.blower_power = config.getfloat(
+            "blower_power", 0.0, minval=0.0, maxval=1.0
+        )
 
         self.printer.register_event_handler(
             "klippy:connect", self._handle_connect
         )
 
-        self.windup_speed = self.stepper.velocity
-        self.homing_speed = self.config.getfloat("homing_speed", 30, above=0.0)
-        self.ignore_trigger = self.config.getboolean("ignore_trigger", False)
-        self.disable_position = self.config.getfloat("disable_position", 0, minval=0.0, maxval=255.0)
-
     def _handle_connect(self):
         self.toolhead = self.printer.lookup_object("toolhead")
 
-    def set_speed(self, print_time, value):
-        self.move_stepper(value * 255.0)
+    def _motor_enabled(self):
+        enable = self.stepper_enable.lookup_enable(self.stepper_name)
+        return enable.is_motor_enabled()
 
-    def enable_stepper(self, enable, v):
-        logging.info(f"enable cflap stepper: {enable}")
-        logging.info(f"cflap stepper status: {self.stepper_enable.lookup_enable(self.name).is_motor_enabled()}")
-        if enable != self.stepper_enable.lookup_enable(self.name).is_motor_enabled():
-            if enable:
-                self.stepper.do_enable(True)
-                self.toolhead.wait_moves()
-                self.stepper.do_set_position(0)
-                self.stepper.do_homing_move(
-                    -255, self.homing_speed, self.stepper.accel, True, not self.ignore_trigger
-                )
-                self.toolhead.wait_moves()
-                self.stepper.do_set_position(0)
-                self.toolhead.wait_moves()
-            else:
-                self.stepper.do_move(self.disable_position, v, self.stepper.accel, 1)
-                self.toolhead.wait_moves()
-                self.stepper.do_enable(False)
-                self.toolhead.wait_moves()
+    def _refresh_homed(self):
+        # Disabling the motor externally (M84 / idle_timeout) loses position.
+        if not self._motor_enabled():
+            self.homed = False
 
-    def move_stepper(self, s, v=None):
-        if v is None:
-            v = self.windup_speed
-        self.enable_stepper(True, v)
-        if s is not None:
-            self.stepper.do_move(s, v, self.stepper.accel, 0)
-        else:
-            self.stepper.do_move(255, v, self.stepper.accel, 0)
+    def set_flap(self, target, speed=None):
+        self._refresh_homed()
+        if not self.homed:
+            raise self.printer.command_error(
+                "Must home flap axis first (run CFLAP_HOME)"
+            )
+        if speed is None:
+            speed = self.windup_speed
+        target = clamp_flap(target)
+        # manual_stepper.do_move generates the move's steps itself, so the
+        # move completes regardless of subsequent toolhead motion. sync=False
+        # means we do not dwell/drain the print queue (no stall).
+        self.ms.do_move(target, speed, self.ms.accel, sync=False)
 
-    def cmd_M106(self, gcmd):
-        p = gcmd.get_int("P", None)
-        s = gcmd.get_float("S", None, minval=0.0, maxval=255.0)
-        v = gcmd.get_float("V", self.windup_speed)
-        if p is not None:
-            if p == 3:
-                speed = 1
-                if s is not None:
-                    if s == 255:
-                        speed = 1
-                    elif s == 0:
-                        speed = 0
-                    else:
-                        speed = round(
-                            s / 255.0, 10
-                        )
-                self.cflap_fan.set_speed_from_command(speed)
-            elif p == 1:
-                self.move_stepper(s, v)
-            else:
-                if s is None:
-                    s = 255.0
+    def close_flap(self, speed=None):
+        # Closing an unhomed flap is a silent no-op (nothing to close).
+        self._refresh_homed()
+        if not self.homed:
+            return
+        if speed is None:
+            speed = self.windup_speed
+        self.ms.do_move(0.0, speed, self.ms.accel, sync=False)
 
-                value = round(
-                    s / 255.0, 10
-                )
-                self.cflap_fan.set_speed_from_command(value)
-        else:
-            self.move_stepper(s, v)
+    def do_home(self):
+        self.ms.do_enable(True)
+        self.toolhead.wait_moves()
+        self.ms.do_set_position(0)
+        self.ms.do_homing_move(
+            -255,
+            self.homing_speed,
+            self.ms.accel,
+            True,
+            not self.ignore_trigger,
+        )
+        self.toolhead.wait_moves()
+        self.ms.do_set_position(0)
+        self.toolhead.wait_moves()
+        self.homed = True
+        # Start the blower for the print.
+        self.cflap_fan.set_speed_from_command(self.blower_power)
 
-    def cmd_M107(self, gcmd):
-        p = gcmd.get_int("P", None)
-        v = gcmd.get_float("V", self.windup_speed)
-        if p is not None:
-            if p == 1:
-                self.move_stepper(0)
-            else:
-                self.cflap_fan.set_speed_from_command(0.0)
-        else:
-            self.cflap_fan.set_speed_from_command(0.0)
-            self.move_stepper(0)
-            self.enable_stepper(False, v)
+    def do_disable(self):
+        self._refresh_homed()
+        if self.homed:
+            self.ms.do_move(
+                clamp_flap(self.disable_position),
+                self.windup_speed,
+                self.ms.accel,
+                sync=True,
+            )
+            self.toolhead.wait_moves()
+        self.ms.do_enable(False)
+        self.homed = False
+        self.cflap_fan.set_speed_from_command(0.0)
 
     def get_status(self, eventtime):
+        # Stepper motion math accumulates tiny floating-point error (e.g.
+        # landing at 254.99999999983655 instead of 255.0), so round before
+        # reporting to give callers (and ASSERTs) clean comparable values.
+        pos = round(self.ms.rail.get_commanded_position() / 255.0, 10)
         return {
-            "power": self.stepper.rail.get_commanded_position() / 255.0,
-            "value": self.stepper.rail.get_commanded_position() / 255.0,
-            "speed": self.stepper.rail.get_commanded_position() / 255.0,
+            "power": pos,
+            "value": pos,
+            "speed": pos,
+            "homed": self.homed,
         }
 
     def get_mcu(self):
@@ -322,9 +328,17 @@ class PrinterCFlapFan:
         gcode.register_command("M106", self.cmd_M106)
         gcode.register_command("M107", self.cmd_M107)
         gcode.register_command(
+            "CFLAP_HOME", self.cmd_CFLAP_HOME, desc=self.cmd_CFLAP_HOME_help
+        )
+        gcode.register_command(
+            "CFLAP_DISABLE",
+            self.cmd_CFLAP_DISABLE,
+            desc=self.cmd_CFLAP_DISABLE_help,
+        )
+        gcode.register_command(
             "CFLAP_SET_WINDUP_SPEED",
             self.cmd_CFLAP_SET_WINDUP_SPEED,
-            desc=self.cmd_CFLAP_SET_WINDUP_SPEED_help
+            desc=self.cmd_CFLAP_SET_WINDUP_SPEED_help,
         )
         gcode.register_mux_command(
             "SET_FAN_SPEED",
@@ -335,21 +349,45 @@ class PrinterCFlapFan:
         )
 
     def cmd_M106(self, gcmd):
-        self.fan.cmd_M106(gcmd)
+        p = gcmd.get_int("P", None)
+        s = gcmd.get_float("S", None, minval=0.0, maxval=255.0)
+        v = gcmd.get_float("V", self.fan.windup_speed)
+        kind, value = route_m106(p, s)
+        if kind == "flap":
+            self.fan.set_flap(value, v)
+        else:
+            self.fan.cflap_fan.set_speed_from_command(value)
 
     def cmd_M107(self, gcmd):
-        self.fan.cmd_M107(gcmd)
+        p = gcmd.get_int("P", None)
+        v = gcmd.get_float("V", self.fan.windup_speed)
+        if route_m107(p) == "flap_close":
+            self.fan.close_flap(v)
+        else:
+            self.fan.cflap_fan.set_speed_from_command(0.0)
+
+    cmd_CFLAP_HOME_help = "Home the cflap flap and start the blower"
+
+    def cmd_CFLAP_HOME(self, gcmd):
+        self.fan.do_home()
+
+    cmd_CFLAP_DISABLE_help = "Park the flap, disable its motor, stop the blower"
+
+    def cmd_CFLAP_DISABLE(self, gcmd):
+        self.fan.do_disable()
 
     cmd_SET_FAN_SPEED_help = "Sets the speed of a fan"
+
     def cmd_SET_FAN_SPEED(self, gcmd):
         speed = gcmd.get_float("SPEED", 0.0)
         self.fan.cflap_fan.set_speed_from_command(speed)
 
     cmd_CFLAP_SET_WINDUP_SPEED_help = "Sets the stepper speed for the cflap"
+
     def cmd_CFLAP_SET_WINDUP_SPEED(self, gcmd):
         speed = gcmd.get_float("SPEED", None)
         if speed is None:
-            self.fan.windup_speed = self.fan.stepper.velocity
+            self.fan.windup_speed = self.fan.ms.velocity
         else:
             self.fan.windup_speed = speed
 
