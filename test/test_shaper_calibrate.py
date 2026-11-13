@@ -124,3 +124,20 @@ def test_fit_shaper_extension_respects_max_smoothing():
     res = _fit(sc, _make_calibration_data(160.0), "mzv", max_smoothing=0.05)
     assert res.freq > MAX_SHAPER_FREQ
     assert res.smoothing <= 0.05
+
+
+def test_find_best_shaper_extends_non_winning_shapers():
+    sc = ShaperCalibrate(printer=None)
+    best, all_shapers = sc.find_best_shaper(_make_calibration_data(160.0))
+    by_name = {s.name: s for s in all_shapers}
+    assert by_name["zv"].freq > MAX_SHAPER_FREQ
+    assert by_name["mzv"].freq > MAX_SHAPER_FREQ
+
+
+@pytest.mark.parametrize("max_freq", [152.0, 170.0])
+def test_find_best_shaper_vals_length_follows_max_freq(max_freq):
+    sc = ShaperCalibrate(printer=None)
+    cd = _make_calibration_data(160.0)
+    _, all_shapers = sc.find_best_shaper(cd, max_freq=max_freq)
+    n = int((cd.freq_bins <= max_freq).sum())
+    assert all(len(s.vals) == n for s in all_shapers)
