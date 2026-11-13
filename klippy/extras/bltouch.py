@@ -214,12 +214,12 @@ class BLTouchEndstopWrapper:
             self.gcode.respond_info(msg + "; retrying.")
             self.send_cmd("reset", duration=RETRY_RESET_TIME)
 
-    def multi_probe_begin(self):
+    def multi_probe_begin(self, context):
         if self.stow_on_each_sample:
             return
         self.multi = "FIRST"
 
-    def multi_probe_end(self):
+    def multi_probe_end(self, context):
         if self.stow_on_each_sample:
             return
         self.sync_print_time()
@@ -230,7 +230,7 @@ class BLTouchEndstopWrapper:
 
     def probing_move(self, pos, speed, gcmd):
         phoming = self.printer.lookup_object("homing")
-        return phoming.probing_move(self, pos, speed)
+        return phoming.probing_move(self, pos, speed, gcmd)
 
     def probe_prepare(self, hmove):
         if self.multi == "OFF" or self.multi == "FIRST":
@@ -342,5 +342,5 @@ def load_config(config):
     global ENDSTOP_SAMPLE_COUNT
     ENDSTOP_SAMPLE_COUNT = get_danger_options().endstop_sample_count
     blt = BLTouchEndstopWrapper(config)
-    config.get_printer().add_object("probe", probe.PrinterProbe(config, blt))
+    probe.PrinterProbe(config, blt)
     return blt

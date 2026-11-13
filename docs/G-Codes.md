@@ -164,17 +164,24 @@ The following commands are available when the
 section](Config_Reference.md#axis_twist_compensation) is enabled.
 
 #### AXIS_TWIST_COMPENSATION_CALIBRATE
-`AXIS_TWIST_COMPENSATION_CALIBRATE [AXIS=<X|Y>]
-[SAMPLE_COUNT=<value>] [<probe_parameter>=<value>]`:
+`AXIS_TWIST_COMPENSATION_CALIBRATE [PROBE=<name>]
+[REFERENCE_PROBE=<name>] [<probe_parameter>=<value>]`:
 
-Calibrates axis twist compensation by specifying the target axis or
-enabling automatic calibration.
+Measure a complete mesh with the target probe, followed by a complete mesh
+with the reference probe. Omitted `PROBE` selects the default probe.
+`REFERENCE_PROBE` overrides the target's configured `reference_probe`, which
+otherwise inherits from the base section and defaults to `manual`.
 
-- **SAMPLE_COUNT:** Number of points tested during the calibration.
-If not specified, it defaults to 3.
+Mesh settings come from `[axis_twist_compensation]`, with overrides from
+`[axis_twist_compensation <target>]` when present. A target does not need an
+existing named section. The resulting reference-minus-target mesh has its
+mean removed and becomes active immediately. Run `SAVE_CONFIG` to store the
+mesh, its layout, and selected reference under the target's named section.
 
-- **AXIS:** Define the axis (`X` or `Y`) for which the twist compensation
-will be calibrated. If not specified, the axis defaults to `'X'`.
+During a manual pass, use `TESTZ` and `ACCEPT` at each point, or `ABORT` to
+cancel. Cancellation or probing errors restore the previous map. A calling
+macro waits for calibration to finish before continuing; cancellation or an
+error stops it. `AXIS` and `SAMPLE_COUNT` are no longer supported.
 
 ### [bed_mesh]
 
@@ -561,6 +568,18 @@ MOTION_QUEUE (as defined in an [extruder](Config_Reference.md#extruder)
 config section). If MOTION_QUEUE is an empty string then the stepper
 will be desynchronized from all extruder movement.
 
+#### SET_NOZZLE_DIAMETER
+`SET_NOZZLE_DIAMETER [EXTRUDER=<config_name>] DIAMETER=<diameter>
+[MAX_EXTRUDE_CROSS_SECTION=<area>]`: Set the nozzle diameter of the
+specified extruder (as defined in an [extruder](Config_Reference.md#extruder)
+config section). If EXTRUDER is not specified, it defaults to the active
+extruder. The maximum extrusion cross section is set to
+MAX_EXTRUDE_CROSS_SECTION (in mm^2) if given, e.g. for a purge line that
+needs more flow than the print. Otherwise it goes back to the
+`max_extrude_cross_section` from the config, or to the default for the new
+diameter (4 * DIAMETER^2) if that option isn't set. Changed settings are
+not retained on Kalico reset.
+
 ### [mixing_extruder]
 
 The following commands are available when a
@@ -777,18 +796,51 @@ state; issue a G28 afterwards to reset the kinematics. This command is
 intended for low-level diagnostics and debugging.
 
 #### SET_KINEMATIC_POSITION
+
 `SET_KINEMATIC_POSITION [X=<value>] [Y=<value>] [Z=<value>]
-[CLEAR=<[X][Y][Z]>]`: Force the low-level kinematic code to believe the
-toolhead is at the given cartesian position. This is a diagnostic and
-debugging command; use SET_GCODE_OFFSET and/or G92 for regular axis
-transformations. If an axis is not specified then it will default to the
-position that the head was last commanded to. Setting an incorrect or
-invalid position may lead to internal software errors. Use the CLEAR
-parameter to forget the homing state for the given axes. Note that CLEAR
-will not override the previous functionality; if an axis is not specified
-to CLEAR it will have its kinematic position set as per above. This
-command may invalidate future boundary checks; issue a G28 afterwards to
-reset the kinematics.
+[SET_HOMED=<[X][Y][Z]>] [CLEAR_HOMED=<[X][Y][Z]>]`: Force the
+low-level kinematic code to believe the toolhead is at the given
+cartesian position and set/clear homed status. This is a diagnostic
+and debugging command; use SET_GCODE_OFFSET and/or G92 for regular
+axis transformations. Setting an incorrect or invalid position may
+lead to internal software errors.
+
+The `X`, `Y`, and `Z` parameters are used to alter the low-level
+kinematic position tracking. If any of these parameters are not set
+then the position is not changed - for example `SET_KINEMATIC_POSITION
+Z=10` would set all axes as homed, set the internal Z position to 10,
+and leave the X and Y positions unchanged. Changing the internal
+position tracking is not dependent on the internal homing state - one
+may alter the position for both homed and not homed axes, and
+similarly one may set or clear the homing state of an axis without
+altering its internal position.
+
+The `SET_HOMED` parameter defaults to `XYZ` which instructs the
+kinematics to consider all axes as homed. A bare
+`SET_KINEMATIC_POSITION` command will result in all axes being
+considered homed (and not change its current position). If it is not
+desired to change the state of homed axes then assign `SET_HOMED` to
+an empty string - for example:
+`SET_KINEMATIC_POSITION SET_HOMED= X=10`. It is also possible to
+request an individual axis be considered homed (eg, `SET_HOMED=X`),
+but note that non-cartesian style kinematics (such as delta
+kinematics) may not support setting an individual axis as homed.
+
+The `CLEAR_HOMED` parameter instructs the kinematics to consider the
+given axes as not homed. For example, `CLEAR_HOMED=XYZ` would request
+all axes to be considered not homed (and thus require homing prior to
+movement on those axes). The default is `SET_HOMED=XYZ` even if
+`CLEAR_HOMED` is present, so the command `SET_KINEMATIC_POSITION
+CLEAR_HOMED=Z` will set X and Y as homed and clear the homing state
+for Z.  Use `SET_KINEMATIC_POSITION SET_HOMED= CLEAR_HOMED=Z` if the
+goal is to clear only the Z homing state. If an axis is specified in
+neither `SET_HOMED` nor `CLEAR_HOMED` then its homing state is not
+changed and if it is specified in both then `CLEAR_HOMED` has
+precedence. It is possible to request clearing of an individual axis,
+but on non-cartesian style kinematics (such as delta kinematics) doing
+so may result in clearing the homing state of additional axes. Note
+the `CLEAR` parameter is currently an alias for the `CLEAR_HOMED`
+parameter, but this alias will be removed in the future.
 
 ### [gcode]
 
@@ -806,7 +858,10 @@ software (see
 clears any error state from the micro-controller.
 
 #### HEATER_INTERRUPT
-`HEATER_INTERRUPT`: Interrupts a TEMPERATURE_WAIT command.
+`HEATER_INTERRUPT`: Interrupts active temperature waits, MPC
+calibration waits, and Python macro `wait_while`, `wait_until`, and
+`sleep` helpers. Commands started after `HEATER_INTERRUPT` are not
+affected.
 
 #### LOG_ROLLOVER
 `LOG_ROLLOVER`: Trigger a klippy.log rollover and generate a new log file.
@@ -937,14 +992,20 @@ operation of the load cell. This command can be run on both calibrated and
 uncalibrated load cells.
 
 ### LOAD_CELL_CALIBRATE
-`LOAD_CELL_CALIBRATE [LOAD_CELL=<config_name>]`: Start the guided calibration
-utility. Calibration is a 3 step process:
+`LOAD_CELL_CALIBRATE [LOAD_CELL=<config_name>] [TARE=TRUE] [SAVE=TRUE]`: 
+Start the guided calibration utility. Calibration is a 3 step process:
 1. First you remove all load from the load cell and run the `TARE` command
 1. Next you apply a known load to the load cell and run the
 `CALIBRATE GRAMS=nnn` command
 1. Finally use the `ACCEPT` command to save the results
 
 You can cancel the calibration process at any time with `ABORT`.
+
+If the `TARE` option is included `reference_tare_counts` will be set at the
+current force. The `SAVE` option also prompts you to save the value and restart
+the printer. The default is to not save the value. Use this option to home the
+load cell in a print start routine at a time when the force on the load cell is
+'zero'. E.g. after [safe_z_home] or similar safety move.
 
 ### LOAD_CELL_TARE
 `LOAD_CELL_TARE [LOAD_CELL=<config_name>]`: This works just like the tare button
@@ -999,6 +1060,121 @@ The idle_timeout module is automatically loaded.
 #### SET_IDLE_TIMEOUT
 `SET_IDLE_TIMEOUT [TIMEOUT=<timeout>]`: Allows the user to set the
 idle timeout (in seconds).
+
+### [indx]
+
+The following commands are available when an
+[indx config section](Config_Reference.md#indx) is enabled (also see
+the [INDX document](INDX.md)).
+
+#### INDX_CALIBRATE
+`INDX_CALIBRATE [MIN_TEMP=<temp>] [MAX_TEMP=<temp>]
+[HOLD_TIME=<seconds>] [COOLDOWN_TIME=<seconds>]`: Tune the inductive
+coil drive timings and fit the heater thermal model. The nozzle must
+be cold (below MIN_TEMP, default 60) and the heater off; the nozzle
+is then heated to MAX_TEMP (default 200), held for HOLD_TIME (default
+10 seconds) and allowed to cool for COOLDOWN_TIME (default 15
+seconds). The heater will not heat until this calibration has been
+performed. Run SAVE_CONFIG afterwards to persist the results.
+
+#### INDX_FAN_CALIBRATE
+`INDX_FAN_CALIBRATE [BREAKS=<count>] [HOLD_TIME=<seconds>]
+[MIN_SPEED=<value>] [TEMP=<temp>] [SETTLE_TIME=<seconds>]`: Measure
+the cooling effect of the part cooling fan at BREAKS (default 6) fan
+speeds between MIN_SPEED (default 0.20) and full speed while holding
+the nozzle at TEMP (default 200). Run SAVE_CONFIG afterwards to
+persist the results.
+
+#### INDX_LOAD_FILAMENT
+`INDX_LOAD_FILAMENT [SPEED=<mm/s>] [MAX_LENGTH=<mm>]
+[PRIME_TIME=<seconds>] [PRIME_LENGTH=<mm>] [THRESHOLD=<value>]
+[SEGMENT_TIME=<seconds>] [APPLY=[0|1]]`: Load filament while
+measuring its thermal properties (the density and heat capacity used
+by the thermal model). Requires a calibrated thermal model and the
+active extruder to be at printing temperature. If APPLY is 1 (the
+default) the measured values are applied and staged for SAVE_CONFIG.
+
+#### INDX_CLEAR_FILAMENT
+`INDX_CLEAR_FILAMENT`: Reset the filament thermal parameters to zero
+(no filament compensation). Run SAVE_CONFIG to persist.
+
+#### INDX_EXTRUDER_MOVE
+`INDX_EXTRUDER_MOVE DISTANCE=<mm> SPEED=<mm/s> CURRENT=<amps>`:
+Perform an extruder move that bypasses the cold extrude check, with
+the TMC run current temporarily lowered to CURRENT (think of it as
+M302 plus a move in a single command). Mainly intended for loading
+and unloading INDX tools without needing to set a low minimum
+extrusion temperature.
+
+#### INDX_SET_MODEL_PARAMS
+`INDX_SET_MODEL_PARAMS [MAX_POWER=<value>]
+[MAX_POWER_TEMP_COEFF=<value>] [THERMAL_CAPACITY=<value>]
+[TO_AMBIENT_R=<value>] [FILAMENT_DIAMETER=<mm>]
+[FILAMENT_DENSITY=<g/cm3>] [FILAMENT_HEAT_CAPACITY=<J/g/K>]
+[PART_COOLING_FAN_A=<value>] [PART_COOLING_FAN_K=<value>]
+[AMBIENT_BLEND_BOARD=<value>] [AMBIENT_BLEND_BRACKET=<value>]
+[AMBIENT_BLEND_SENSOR=<value>] [ERROR_APPLICATION=<value>]`: Set
+thermal model parameters at runtime. Updated values are staged for
+SAVE_CONFIG.
+
+#### INDX_SET_PID
+`INDX_SET_PID [KP=<value>] [TI=<value>] [TD=<value>] [B=<value>]
+[I_WINDOW=<degrees>] [I_LIMIT=<duty>]`:
+Update the PID parameters of the controller running on the toolboard.
+
+#### INDX_MEASURE_POWER
+`INDX_MEASURE_POWER [DURATION=<seconds>]`: Measure the heater power
+draw over DURATION (default 5) seconds and report the total energy
+and average power.
+
+#### INDX_DOCK_MEASURE
+`INDX_DOCK_MEASURE [X_FIRST=[0|1]] [RETREAT=X,Y]`: Measure the dock
+X/Y position of an INDX toolchanger by energizing the XY motors and
+homing. Set X_FIRST=1 to home X before Y. The result is reported and
+exported in the module status. RETREAT can optionally be specified,
+in which case the toolhead will perform this move before doing the
+homing operations.
+
+#### INDX_FORCE_BRACKET_TEMP
+`INDX_FORCE_BRACKET_TEMP [TEMP=<temp>]`: Override the sensor bracket
+temperature reported to the toolboard. Run without TEMP to remove the
+override.
+
+#### INDX_SET_IR_SENSOR_PARAMS
+`INDX_SET_IR_SENSOR_PARAMS EXPONENT=<value> OBJ_GAIN=<value>
+BRACKET_GAIN=<value>`: Override the IR sensor tuning parameters
+stored in the sensor EEPROM. EXPONENT must be above 0. These should
+not normally be changed.
+
+#### INDX_SET_CYCLE_LIMIT
+`INDX_SET_CYCLE_LIMIT LIMIT=<value>`: Limit the coil driver duty
+(mainly for development and testing).
+
+#### INDX_LED_FORCE_COLOR
+`INDX_LED_FORCE_COLOR [RED=<0-255>] [GREEN=<0-255>] [BLUE=<0-255>]
+[CLEAR=1]`: Force the toolboard status LED to the given color,
+overriding the automatic status indication. Use CLEAR=1 to return the
+LED to automatic control.
+
+#### INDX_LED_SET_CURRENT
+`INDX_LED_SET_CURRENT RED=<0-255> GREEN=<0-255> BLUE=<0-255>`: Set
+the per-channel drive current of the toolboard status LED.
+
+#### INDX_LOG
+`INDX_LOG`: Toggle logging of heater temperature, model and power
+data to "/tmp/indx_log.csv" (for debugging).
+
+#### INDX_DUMP_MODEL_UPDATE
+`INDX_DUMP_MODEL_UPDATE`: Report the internal state of the last
+thermal model update (for debugging).
+
+#### INDX_DEBUG_IR_SENSOR_EEPROM
+`INDX_DEBUG_IR_SENSOR_EEPROM`: Dump the IR sensor EEPROM contents
+(for debugging).
+
+#### INDX_DEBUG_STREAM_RAW_IR_SENSOR
+`INDX_DEBUG_STREAM_RAW_IR_SENSOR`: Toggle streaming of raw IR sensor
+readings to a timestamped csv file under /tmp (for debugging).
 
 ### [input_shaper]
 
@@ -1090,16 +1266,78 @@ corresponding settings from the
 - `MIN_TAP_QUALITY=<percent>`
 - `DECOMPRESSION_ANGLE=<angle>`
 
+### LOAD_CELL_PROBE_CALIBRATE
+`LOAD_CELL_PROBE_CALIBRATE CALIBRATION=<calibration_type> [<parameters>]`: 
+Run automated calibration routines for load cell probe parameters. All calibrations
+probe a bed mesh and save results for the current session (use `SAVE_CONFIG` to persist).
+
+Available calibration types:
+- `DRIFT_FILTER`: Calibrate drift_filter_cutoff_frequency
+- `TAP_PERFORMANCE`: Calibrate pullback_distance and decompression_angle
+
+All calibrations accept [BED_MESH_CALIBRATE](#bed_mesh_calibrate) parameters for 
+controlling mesh point generation (PROFILE, MESH_MIN, MESH_MAX, PROBE_COUNT, ALGORITHM, etc.).
+See [Load Cell Calibration](Load_Cell.md#calibration) for detailed usage and examples.
+
+#### DRIFT_FILTER Calibration
+`LOAD_CELL_PROBE_CALIBRATE CALIBRATION=DRIFT_FILTER [MAXIMUM_Z_POSITION=<pos>] 
+[MAX_Z_VELOCITY=<vel>] [APPROACH_SPEED=<speed>] [SEGMENT_DURATION=<duration>] 
+[SLOPE_PERCENTILE=<pct>] [MAX_DRIFT_RATE=<drift_rate>] 
+[MAX_CUTOFF_FREQUENCY=<freq>] [CUTOFF_INCREMENT=<inc>] [<bed_mesh_parameters>]`
+
+Calibrates the drift filter cutoff frequency by measuring force drift during slow Z 
+descents at each mesh point. The drift filter removes slow force changes caused by 
+bowden tube movement, keeping the signal centered on zero.
+
+- **MAXIMUM_Z_POSITION**: Starting height for drift measurement. If not specified, 
+  defaults to the printer's maximum Z position (the delta Z limit on delta printers).
+- **MAX_Z_VELOCITY**: Maximum speed for Z moves between points. If not specified, 
+  defaults to the kinematics `max_z_velocity`.
+- **APPROACH_SPEED**: Descent speed in mm/s during measurement (slower collects more 
+  data). The default is 10.0 or `MAX_Z_VELOCITY`, whichever is lower.
+  Values above `MAX_Z_VELOCITY` are limited to it.
+- **SEGMENT_DURATION**: Time window in seconds for drift analysis. The default is 5.0.
+- **SLOPE_PERCENTILE**: Which percentile of slopes must meet criteria (higher is 
+  stricter). The default is 99.0 (valid range: 0-100).
+- **MAX_DRIFT_RATE**: Maximum acceptable drift rate in grams/second. The 
+  default is 1.0.
+- **MAX_CUTOFF_FREQUENCY**: Upper limit for filter frequency in Hz. The default is 20.0.
+- **CUTOFF_INCREMENT**: Step size in Hz when searching for optimal frequency. The 
+  default is 0.1.
+
+See [Drift Filter Calibration](Load_Cell.md#drift-filter-calibration)
+
+#### TAP_PERFORMANCE Calibration
+`LOAD_CELL_PROBE_CALIBRATE CALIBRATION=TAP_PERFORMANCE [PULLBACK_DISTANCE=<dist>]
+[<bed_mesh_parameters>]`
+
+Optimizes the `pullback_distance` parameter by measuring actual decompression distances during 
+normal probing across the bed. Computes a safe minimum using statistical analysis:
+`(mean + 3σ) × 2.0`.
+
+Then calibrates the `decompression_angle` used by the tap quality classifier from the
+same taps. The calibration fails if any tap does not pass the quality check.
+
+- **PULLBACK_DISTANCE**: Temporary pullback distance in mm to use during calibration 
+  testing. The default is 1.0 (valid range: 0.5-2.0).
+
+See [Tap Performance Calibration](Load_Cell.md#tap-performance-calibration) and [Decompression Angle Calibration](Load_Cell.md#decompression-angle-calibration) for choosing thresholds and interpreting results.
+
 ### [manual_probe]
 
-The manual_probe module is automatically loaded.
+The manual_probe module is automatically loaded and registers a probe named
+`manual`. It becomes the default probe when no other default probe is selected.
+Use `MANUAL_PROBE` for standalone manual probing, or `PROBE=manual` to select
+it in calibration commands such as `BED_MESH_CALIBRATE`. `METHOD=manual`
+remains supported by those calibration commands. The manual probe does not
+register the standard probe commands.
 
 #### MANUAL_PROBE
-`MANUAL_PROBE [SPEED=<speed>]`: Run a helper script useful for
+`MANUAL_PROBE [PROBE=<name>] [SPEED=<speed>]`: Run a helper script useful for
 measuring the height of the nozzle at a given location. If SPEED is
 specified, it sets the speed of TESTZ commands (the default is
-5mm/s). During a manual probe, the following additional commands are
-available:
+5mm/s). The probe defaults to `manual`; use `PROBE` to select another probe.
+During a manual probe, the following additional commands are available:
 - `ACCEPT`: This command accepts the current Z position and concludes
   the manual probing tool.
 - `ABORT`: This command terminates the manual probing tool.
@@ -1109,11 +1347,16 @@ available:
   .1mm. The value may also be `+`, `-`, `++`, or `--` to move the
   nozzle up or down an amount relative to previous attempts.
 
+Manual probing waits until each point is accepted or probing is aborted before
+the calling command or macro continues. Send `TESTZ`, `ACCEPT`, and `ABORT`
+through the API (for example, a printer web interface). Commands in the same
+pseudo-TTY stream remain queued behind the waiting command.
+
 #### Z_ENDSTOP_CALIBRATE
-`Z_ENDSTOP_CALIBRATE [SPEED=<speed>]`: Run a helper script useful for
-calibrating a Z position_endstop config setting. See the MANUAL_PROBE
-command for details on the parameters and the additional commands
-available while the tool is active.
+`Z_ENDSTOP_CALIBRATE [PROBE=<name>] [SPEED=<speed>]`: Calibrate a Z
+position_endstop config setting. The probe defaults to `manual`; use `PROBE`
+to select another probe. See the MANUAL_PROBE command for details on the
+parameters and the additional commands available while the tool is active.
 
 #### Z_OFFSET_APPLY_ENDSTOP
 `Z_OFFSET_APPLY_ENDSTOP`: Take the current Z Gcode offset (aka,
@@ -1145,6 +1388,25 @@ reports not triggered). Normally future G-Code commands will be
 scheduled to run after the stepper move completes, however if a manual
 stepper move uses SYNC=0 then future G-Code movement commands may run
 in parallel with the stepper movement.
+
+`MANUAL_STEPPER STEPPER=config_name GCODE_AXIS=[A-Z]
+[LIMIT_VELOCITY=<velocity>] [LIMIT_ACCEL=<accel>]
+[INSTANTANEOUS_CORNER_VELOCITY=<velocity>]`: If the `GCODE_AXIS`
+parameter is specified then it configures the stepper motor as an
+extra axis on `G1` move commands.  For example, if one were to issue a
+`MANUAL_STEPPER ... GCODE_AXIS=R` command then one could issue
+commands like `G1 X10 Y20 R30` to move the stepper motor.  The
+resulting moves will occur synchronously with the associated toolhead
+xyz movements.  If the motor is associated with a `GCODE_AXIS` then
+one may no longer issue movements using the above `MANUAL_STEPPER`
+command - one may unregister the stepper with a `MANUAL_STEPPER
+... GCODE_AXIS=` command to resume manual control of the motor. The
+`LIMIT_VELOCITY` and `LIMIT_ACCEL` parameters allow one to reduce the
+speed of `G1` moves if those moves would result in a velocity or
+acceleration above the specified limits. The
+`INSTANTANEOUS_CORNER_VELOCITY` specifies the maximum instantaneous
+velocity change (in mm/s) of the motor during the junction of two
+moves (the default is 1mm/s).
 
 ### [mcp4018]
 
@@ -1299,6 +1561,11 @@ HEATER generally takes the short name (so for `heater_generic chamber` you would
 only write `chamber`)
 
 #### PID_PROFILE
+Despite the name, profiles are not limited to PID control: a profile
+carries a control algorithm (`pid`, `pid_v`, `dual_loop_pid`,
+`watermark` or `mpc`) along with its settings, and loading a profile
+switches the heater to that algorithm.
+
 `PID_PROFILE LOAD=<profile_name> HEATER=<heater_name> [DEFAULT=<profile_name>]
 [VERBOSE=<verbosity>] [KEEP_TARGET=0|1] [LOAD_CLEAN=0|1]`:
 Loads the given PID_PROFILE for the specified heater. If DEFAULT is specified,
@@ -1317,7 +1584,9 @@ if you encounter weird behaviour while switching profiles.
 
 `PID_PROFILE SAVE=<profile_name> HEATER=<heater_name>`:
 Saves the currently loaded profile of the specified heater to the config under
-the given name.
+the given name. Supported for the PID control types and `watermark`;
+`mpc` profiles cannot be saved this way (use the
+[MPC calibration flow](MPC.md) and SAVE_CONFIG instead).
 
 `PID_PROFILE REMOVE=<profile_name> HEATER=<heater_name>`:
 Removes the given profile from the profiles List for the current session and
@@ -1338,8 +1607,11 @@ started up, if set to 0, the profile will retain previous heating information.
 By default the information will be kept to reduce overshoot, change this value
 if you encounter weird behaviour while switching profiles.
 
-`PID_PROFILE GET_VALUES HEATER=<heater_name>`:
-Outputs the values of the current loaded pid_profile of the given heater to the console.
+`PID_PROFILE GET_VALUES=<profile_name> HEATER=<heater_name>`:
+Outputs the values of the currently loaded profile of the given heater to the
+console (the `GET_VALUES` value is required by the command syntax but
+ignored; the active profile is always shown). For non-PID control types
+(`watermark`, `mpc`) the profile fields are listed generically.
 
 ### [pause_resume]
 
@@ -1386,7 +1658,7 @@ The following commands are available when a
 see the [probe calibrate guide](Probe_Calibrate.md)).
 
 #### PROBE
-`PROBE [PROBE_SPEED=<mm/s>] [LIFT_SPEED=<mm/s>] [SAMPLES=<count>]
+`PROBE [PROBE=<name>] [PROBE_SPEED=<mm/s>] [LIFT_SPEED=<mm/s>] [SAMPLES=<count>]
 [SAMPLE_RETRACT_DIST=<mm>] [SAMPLES_TOLERANCE=<mm>]
 [SAMPLES_TOLERANCE_RETRIES=<count>] [SAMPLES_RESULT=median|average]
 [BAD_PROBE_STRATEGY=<FAIL|IGNORE|RETRY|CIRCLE>] [BAD_PROBE_RETRIES=<count>]
@@ -1395,6 +1667,8 @@ Move the nozzle downwards until the probe triggers. If any of the
 optional parameters are provided they override their equivalent
 setting in the [probe config section](Config_Reference.md#probe).
 - `HOME`: Set the value `z` to home the z axis from the probe result
+- `PROBE`: Name of probe to use for this operation. Leave out to use the 
+  default probe.
 The following optional parameters control probe quality handling (for probes
 that support quality detection): ⚠️
 - `BAD_PROBE_STRATEGY`: Strategy to use when a bad probe is detected.
@@ -1405,28 +1679,32 @@ that support quality detection): ⚠️
 - `PATTERN_SPACING`: Spacing (in mm) for the circular retry pattern when
   using CIRCLE strategy.
 
+#### LIST_PROBES
+`LIST_PROBES`: List the registered probes.
+
 #### QUERY_PROBE
-`QUERY_PROBE`: Report the current status of the probe ("triggered" or
+`QUERY_PROBE [PROBE=<name>]`: Report the current status of the probe ("triggered" or
 "open").
 
 #### PROBE_ACCURACY
-`PROBE_ACCURACY [PROBE_SPEED=<mm/s>] [SAMPLES=<count>]
+`PROBE_ACCURACY [PROBE=<name>] [PROBE_SPEED=<mm/s>] [SAMPLES=<count>]
 [SAMPLE_RETRACT_DIST=<mm>]`: Calculate the maximum, minimum, average,
 median, and standard deviation of multiple probe samples. By default,
 10 SAMPLES are taken. Otherwise the optional parameters default to
 their equivalent setting in the probe config section.
 
 #### PROBE_CALIBRATE
-`PROBE_CALIBRATE [SPEED=<speed>] [<probe_parameter>=<value>]`: Run a
-helper script useful for calibrating the probe's z_offset. See the
-PROBE command for details on the optional probe parameters. See the
+`PROBE_CALIBRATE [PROBE=<name>] [REFERENCE_PROBE=<name>]
+[SPEED=<speed>] [<probe_parameter>=<value>]`: Run a helper script useful
+for calibrating the probe's z_offset. `REFERENCE_PROBE` selects the
+reference probe, which defaults to `manual`. See the PROBE command for details on the optional probe parameters. See the
 MANUAL_PROBE command for details on the SPEED parameter and the
 additional commands available while the tool is active. Please note,
 the PROBE_CALIBRATE command uses the speed variable to move in XY
 direction as well as Z.
 
 #### Z_OFFSET_APPLY_PROBE
-`Z_OFFSET_APPLY_PROBE`: Take the current Z Gcode offset (aka,
+`Z_OFFSET_APPLY_PROBE [PROBE=<name>]`: Take the current Z Gcode offset (aka,
 babystepping), and subtract if from the probe's z_offset.  This acts
 to take a frequently used babystepping value, and "make it permanent".
 Requires a `SAVE_CONFIG` to take effect.
@@ -1459,11 +1737,12 @@ The following commands are available when a
 is enabled.
 
 #### PROBE_EDDY_CURRENT_CALIBRATE
-`PROBE_EDDY_CURRENT_CALIBRATE CHIP=<config_name>`: This starts a tool
-that calibrates the sensor resonance frequencies to corresponding Z
+`PROBE_EDDY_CURRENT_CALIBRATE CHIP=<config_name> [PROBE=<name>]`:
+This starts a tool that calibrates the sensor resonance frequencies to corresponding Z
 heights. The tool will take a couple of minutes to complete. After
 completion, use the SAVE_CONFIG command to store the results in the
-printer.cfg file.
+printer.cfg file. The reference probe defaults to `manual`; use `PROBE` to
+select another probe.
 
 #### LDC_CALIBRATE_DRIVE_CURRENT
 `LDC_CALIBRATE_DRIVE_CURRENT CHIP=<config_name>` This tool will
@@ -2139,14 +2418,60 @@ the config.
 homing (for use in e.g. non-standard homing routines) - will be reset
 automatically upon homing.
 
+#### Z_THERMAL_ADJUST_CALIBRATE
+`Z_THERMAL_ADJUST_CALIBRATE CALIBRATION=NOZZLE HEATER=<heater>
+ [COMPONENT=name] [PROBE=<probe>] [MIN_TEMP=<value>] [MAX_TEMP=<value>]
+ [MEASUREMENTS=<count>] [SOAK_TIME=<seconds>]
+ [Z_LIFT=<mm>] [Z_LIFT_SPEED=<mm/s>]`: Measures the
+thermal expansion of the nozzle and calculates the `temp_coeff` for the
+`[z_thermal_adjust]` section. The printer must be homed and the nozzle must be
+positioned over a clean spot on the bed where probing is possible.
+The command heats the nozzle from `MIN_TEMP` up to `MAX_TEMP`, and then back
+down to `MIN_TEMP` for a complete thermal cycle. It splits the temperature range
+into `MEASUREMENTS` steps. Each step starts with a pause for `SOAK_TIME`, probes
+to measure the nozzle and lifts the toolhead by `Z_LIFT` to resume heating. The
+heater is turned off when the command finishes or fails.
+A linear regression of the probe results against temperature gives the coefficient,
+which is reported and stored as the section's `temp_coeff`. Run `SAVE_CONFIG`
+to write it to the config file and restart. See also
+[Nozzle Temperature Compensation](Load_Cell.md#nozzle-temperature-compensation).
+
+- `CALIBRATION`: The type of calibration routine to run. Required. Only `NOZZLE` is currently
+supported; `FRAME` is reserved for future use.
+- `HEATER`: The name of the heater to calibrate with, typically `extruder`. Required.
+- `COMPONENT`: if multiple thermal adjustment are defined use `COMPONENT` to
+specify which one to calibrate.
+- `PROBE`: The probe to measure with, if more than one probe is configured.
+- `MIN_TEMP`: The lowest temperature to measure at. The default is 140.
+- `MAX_TEMP`: The highest temperature to measure at. It must be greater than
+`MIN_TEMP`. The default is 250.
+- `MEASUREMENTS`: The number of distinct temperatures to measure
+at between `MIN_TEMP` and `MAX_TEMP`, inclusive. The minimum is 2 and the
+default is 10. Each temperature is measured twice, once while heating and 
+once while cooling.
+- `SOAK_TIME`: Seconds to wait after the heater reaches each temperature, to
+let the nozzle and heatbreak reach thermal equilibrium. The default is 20.
+- `Z_LIFT`: Distance in mm to raise the toolhead after each probe. The default
+is 10.
+- `Z_LIFT_SPEED`: Speed in mm/s of the lift move. The default is 5.
+
+When the calculation completes the command reports the total elongation and
+temperature range measured and the resulting temperature coefficient. It also
+saves a plot of the measurements and fitted line as
+`nozzle_elongation_YYYY-MM-DD_HH-MM-SS.png` in the same directory as the
+Klipper log file, and prints a link to it (the link assumes
+[Moonraker](https://github.com/Arksine/moonraker) serves the `logs` root).
+Plotting requires `matplotlib` and a configured log file; if there is no log
+file the plot is skipped.
+
 ### ⚠️ [z_calibration]
 
 The following commands are available when a
 [z_calibration config section](Config_Reference.md#z_calibration) is enabled
 (also see the [Z-Calibration guide](Z_Calibration.md)):
-- `CALIBRATE_Z`: This calibrates the current offset between the nozzle and
+- `CALIBRATE_Z [PROBE=<probe>]`: This calibrates the current offset between the nozzle and
   the print surface.
-- `PROBE_Z_ACCURACY [PROBE_SPEED=<mm/s>] [LIFT_SPEED=<mm/s>] [SAMPLES=<count>]
+- `PROBE_Z_ACCURACY [PROBE=<probe>] [PROBE_SPEED=<mm/s>] [LIFT_SPEED=<mm/s>] [SAMPLES=<count>]
   [SAMPLE_RETRACT_DIST=<mm>]`: Calculate the maximum, minimum,
   average, median, and standard deviation of multiple probe
   samples. By default, 10 SAMPLES are taken. Otherwise the optional

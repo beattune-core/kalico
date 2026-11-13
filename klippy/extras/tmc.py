@@ -6,7 +6,9 @@
 import collections
 import logging
 
-from klippy import stepper
+from klippy import mcu, stepper
+
+from . import bulk_sensor
 
 ######################################################################
 # Field helpers
@@ -117,7 +119,7 @@ class FieldHelper:
 
 
 class TMCErrorCheck:
-    def __init__(self, config, mcu_tmc):
+    def __init__(self, config, mcu_tmc, temp_from_adc=None):
         self.printer = config.get_printer()
         name_parts = config.get_name().split()
         self.stepper_name = " ".join(name_parts[1:])
@@ -125,6 +127,17 @@ class TMCErrorCheck:
         self.fields = mcu_tmc.get_fields()
         self.check_timer = None
         self.last_drv_status = self.last_drv_fields = None
+        # A non-critical mcu only counts as back once its config is resent
+        self.mcu_offline = False
+        mcu = mcu_tmc.get_mcu()
+        self.printer.register_event_handler(
+            mcu.get_non_critical_disconnect_event_name(),
+            self._handle_mcu_offline,
+        )
+        self.printer.register_event_handler(
+            mcu.get_non_critical_reconnect_event_name(),
+            self._handle_mcu_online,
+        )
         # Setup for GSTAT query
         reg_name = self.fields.lookup_register("drv_err")
         if reg_name is not None:
@@ -156,6 +169,7 @@ class TMCErrorCheck:
         # Setup for temperature query
         self.adc_temp = None
         self.adc_temp_reg = self.fields.lookup_register("adc_temp")
+        self.temp_from_adc = temp_from_adc
         if self.adc_temp_reg is not None:
             pheaters = self.printer.load_object(config, "heaters")
             pheaters.register_monitor(config)
@@ -210,7 +224,16 @@ class TMCErrorCheck:
             self.adc_temp = None
             return
 
+    def _handle_mcu_offline(self):
+        self.mcu_offline = True
+
+    def _handle_mcu_online(self):
+        self.mcu_offline = False
+
     def _do_periodic_check(self, eventtime):
+        mcu = self.mcu_tmc.get_mcu()
+        if self.mcu_offline or mcu.non_critical_disconnected:
+            return eventtime + 1.0
         try:
             self._query_register(self.drv_status_reg_info)
             if self.gstat_reg_info is not None:
@@ -218,6 +241,9 @@ class TMCErrorCheck:
             if self.adc_temp_reg is not None:
                 self._query_temperature()
         except self.printer.command_error as e:
+            # A non-critical mcu dropping mid-query is not a driver fault
+            if mcu.non_critical_disconnected:
+                return eventtime + 1.0
             self.printer.invoke_shutdown(str(e))
             return self.printer.get_reactor().NEVER
         return eventtime + 1.0
@@ -253,7 +279,8 @@ class TMCErrorCheck:
             return {"drv_status": None, "temperature": None}
         temp = None
         if self.adc_temp is not None:
-            temp = round((self.adc_temp - 2038) / 7.7, 2)
+            adc = self.fields.get_field("adc_temp", self.adc_temp)
+            temp = round(self.temp_from_adc(adc), 2)
         last_value, reg_name = self.drv_status_reg_info[:2]
         if last_value != self.last_drv_status:
             self.last_drv_status = last_value
@@ -263,29 +290,143 @@ class TMCErrorCheck:
 
 
 ######################################################################
+# Record driver status
+######################################################################
+
+
+class TMCStallguardDump:
+    def __init__(self, config, mcu_tmc):
+        self.printer = config.get_printer()
+        self.stepper_name = " ".join(config.get_name().split()[1:])
+        self.mcu_tmc = mcu_tmc
+        self.mcu = self.mcu_tmc.get_mcu()
+        self.fields = self.mcu_tmc.get_fields()
+        self.sg2_supp = False
+        self.sg4_reg_name = None
+        # It is possible to support TMC2660, just disable it for now
+        if not self.fields.all_fields.get("DRV_STATUS", None):
+            return
+        # Collect driver capabilities
+        if self.fields.all_fields["DRV_STATUS"].get("sg_result", None):
+            self.sg2_supp = True
+        # New drivers have separate register for SG4 result
+        if self.mcu_tmc.name_to_reg.get("SG_RESULT", 0):
+            self.sg4_reg_name = "SG_RESULT"
+        # 2240 supports both SG2 & SG4
+        if self.sg4_reg_name is None:
+            if self.mcu_tmc.name_to_reg.get("SG4_RESULT", 0):
+                self.sg4_reg_name = "SG4_RESULT"
+        # TMC2208
+        if self.sg2_supp is None and self.sg4_reg_name is None:
+            return
+        self.optimized_spi = False
+        # Bulk API
+        self.samples = []
+        self.query_timer = None
+        self.error = None
+        self.batch_bulk = bulk_sensor.BatchBulkHelper(
+            self.printer, self._dump, self._start, self._stop
+        )
+        api_resp = {"header": ("time", "sg_result", "cs_actual")}
+        self.batch_bulk.add_mux_endpoint(
+            "tmc/stallguard_dump", "name", self.stepper_name, api_resp
+        )
+
+    def _start(self):
+        self.error = None
+        status = self.mcu_tmc.get_register_raw("DRV_STATUS")
+        if status.get("spi_status"):
+            self.optimized_spi = True
+        reactor = self.printer.get_reactor()
+        self.query_timer = reactor.register_timer(self._query_tmc, reactor.NOW)
+
+    def _stop(self):
+        self.printer.get_reactor().unregister_timer(self.query_timer)
+        self.query_timer = None
+        self.samples = []
+
+    def _query_tmc(self, eventtime):
+        sg_result = -1
+        cs_actual = -1
+        recv_time = eventtime
+        try:
+            if self.optimized_spi or self.sg4_reg_name == "SG4_RESULT":
+                # TMC2130/TMC5160/TMC2240
+                status = self.mcu_tmc.get_register_raw("DRV_STATUS")
+                reg_val = status["data"]
+                cs_actual = self.fields.get_field("cs_actual", reg_val)
+                sg_result = self.fields.get_field("sg_result", reg_val)
+                is_stealth = self.fields.get_field("stealth", reg_val)
+                recv_time = status["#receive_time"]
+                if is_stealth and self.sg4_reg_name == "SG4_RESULT":
+                    sg4_ret = self.mcu_tmc.get_register_raw("SG4_RESULT")
+                    sg_result = sg4_ret["data"]
+                    recv_time = sg4_ret["#receive_time"]
+            else:
+                # TMC2209
+                if self.sg4_reg_name == "SG_RESULT":
+                    sg4_ret = self.mcu_tmc.get_register_raw("SG_RESULT")
+                    sg_result = sg4_ret["data"]
+                    recv_time = sg4_ret["#receive_time"]
+        except self.printer.command_error as e:
+            self.error = e
+            return self.printer.get_reactor().NEVER
+        print_time = self.mcu.estimated_print_time(recv_time)
+        self.samples.append((print_time, sg_result, cs_actual))
+        if self.optimized_spi:
+            return eventtime + 0.001
+        # UART queried as fast as possible
+        return eventtime + 0.005
+
+    def _dump(self, eventtime):
+        if self.error:
+            raise self.error
+        samples = self.samples
+        self.samples = []
+        return {"data": samples}
+
+
+######################################################################
 # G-Code command helpers
 ######################################################################
 
 
 class TMCCommandHelper:
-    def __init__(self, config, mcu_tmc, current_helper):
+    def __init__(
+        self,
+        config,
+        mcu_tmc,
+        current_helper,
+        temp_from_adc=None,
+        init_callback=None,
+    ):
         self.printer = config.get_printer()
         self.stepper_name = " ".join(config.get_name().split()[1:])
         self.name = config.get_name().split()[-1]
         self.mcu_tmc = mcu_tmc
         self.current_helper = current_helper
-        self.echeck_helper = TMCErrorCheck(config, mcu_tmc)
+        self.init_callback = init_callback
         self.fields = mcu_tmc.get_fields()
-        self.read_registers = self.read_translate = None
-        self.toff = None
-        self.mcu_phase_offset = None
         self.stepper = None
+        # Stepper phase tracking
+        self.mcu_phase_offset = None
+        # Stepper enable/disable tracking
+        self.toff = None
         self.stepper_enable = self.printer.load_object(config, "stepper_enable")
+        self.enable_mutex = self.printer.get_reactor().mutex()
+        # DUMP_TMC support
+        self.read_registers = self.read_translate = None
+        # Common tmc helpers
+        self.echeck_helper = TMCErrorCheck(config, mcu_tmc, temp_from_adc)
+        self.record_helper = TMCStallguardDump(config, mcu_tmc)
+        # Set microstep config options
+        TMCMicrostepHelper(config, mcu_tmc)
+        # Register callbacks
         self.printer.register_event_handler(
             "stepper:sync_mcu_position", self._handle_sync_mcu_pos
         )
         self.printer.register_event_handler(
-            "stepper:set_sdir_inverted", self._handle_sync_mcu_pos
+            "stepper:set_dir_inverted", self._handle_sync_mcu_pos
         )
         self.printer.register_event_handler(
             "klippy:mcu_identify", self._handle_mcu_identify
@@ -293,8 +434,6 @@ class TMCCommandHelper:
         self.printer.register_event_handler(
             "klippy:connect", self._handle_connect
         )
-        # Set microstep config options
-        TMCMicrostepHelper(config, mcu_tmc)
         # Register commands
         gcode = self.printer.lookup_object("gcode")
         gcode.register_mux_command(
@@ -320,6 +459,8 @@ class TMCCommandHelper:
         )
 
     def _init_registers(self, print_time=None):
+        if self.init_callback is not None:
+            self.init_callback()
         # Send registers
         for reg_name in list(self.fields.registers.keys()):
             val = self.fields.registers[reg_name]  # Val may change during loop
@@ -417,6 +558,9 @@ class TMCCommandHelper:
     def _get_phases(self):
         return (256 >> self.fields.get_field("mres")) * 4
 
+    def clear_mcu_phase_offset(self):
+        self.mcu_phase_offset = None
+
     def get_phase_offset(self):
         return self.mcu_phase_offset, self._get_phases()
 
@@ -456,61 +600,55 @@ class TMCCommandHelper:
 
     # Stepper enable/disable tracking
     def _do_enable(self, print_time):
-        try:
-            if self.toff is not None:
-                # Shared enable via comms handling
-                self.fields.set_field("toff", self.toff)
-            self._init_registers()
-            did_reset = self.echeck_helper.start_checks()
-            if did_reset:
-                self.mcu_phase_offset = None
-            # Calculate phase offset
+        if self.toff is not None:
+            # Shared enable via comms handling
+            self.fields.set_field("toff", self.toff)
+        self._init_registers()
+        did_reset = self.echeck_helper.start_checks()
+        if did_reset:
+            self.mcu_phase_offset = None
+        # Calculate phase offset
+        if self.mcu_phase_offset is not None:
+            return
+        gcode = self.printer.lookup_object("gcode")
+        with gcode.get_mutex():
             if self.mcu_phase_offset is not None:
                 return
-            gcode = self.printer.lookup_object("gcode")
-            with gcode.get_mutex():
-                if self.mcu_phase_offset is not None:
-                    return
-                logging.info(
-                    "Pausing toolhead to calculate %s phase offset",
-                    self.stepper_name,
-                )
-                self.printer.lookup_object("toolhead").wait_moves()
-                self._handle_sync_mcu_pos(self.stepper)
-        except self.printer.command_error as e:
-            self.printer.invoke_shutdown(str(e))
+            logging.info(
+                "Pausing toolhead to calculate %s phase offset",
+                self.stepper_name,
+            )
+            self.printer.lookup_object("toolhead").wait_moves()
+            self._handle_sync_mcu_pos(self.stepper)
 
     def _do_disable(self, print_time):
-        try:
-            if self.toff is not None:
-                val = self.fields.set_field("toff", 0)
-                reg_name = self.fields.lookup_register("toff")
-                self.mcu_tmc.set_register(reg_name, val, print_time)
-            self.echeck_helper.stop_checks()
-        except self.printer.command_error as e:
-            self.printer.invoke_shutdown(str(e))
+        if self.toff is not None:
+            val = self.fields.set_field("toff", 0)
+            reg_name = self.fields.lookup_register("toff")
+            self.mcu_tmc.set_register(reg_name, val, print_time)
+        self.echeck_helper.stop_checks()
 
+    def _handle_stepper_enable(self, print_time, is_enable):
+        def enable_disable_cb(eventtime):
+            try:
+                with self.enable_mutex:
+                    if is_enable:
+                        self._do_enable(print_time)
+                    else:
+                        self._do_disable(print_time)
+            except self.printer.command_error as e:
+                self.printer.invoke_shutdown(str(e))
+
+        self.printer.get_reactor().register_callback(enable_disable_cb)
+
+    # Initial startup handling
     def _handle_mcu_identify(self):
         # Lookup stepper object
         force_move = self.printer.lookup_object("force_move")
         self.stepper = force_move.lookup_stepper(self.stepper_name)
         self.stepper.set_tmc_current_helper(self.current_helper)
-
         # Note pulse duration and step_both_edge optimizations available
         self.stepper.setup_default_pulse_duration(0.000000100, True)
-
-    def _handle_stepper_enable(self, print_time, is_enable):
-        if is_enable:
-
-            def cb(ev):
-                return self._do_enable(print_time)
-
-        else:
-
-            def cb(ev):
-                return self._do_disable(print_time)
-
-        self.printer.get_reactor().register_callback(cb)
 
     def _handle_connect(self):
         # Check if using step on both edges optimization
@@ -621,8 +759,8 @@ class TMCVirtualPinHelper:
             self.diag_pin = config.get("diag_pin", None)
             self.diag_pin_field = None
         self.mcu_endstop = None
-        self.en_pwm = False
-        self.pwmthrs = self.coolthrs = self.thigh = 0
+        self._dirty_regs = collections.OrderedDict()
+        self._prev_state = collections.OrderedDict()
         # Register virtual_endstop pin
         name_parts = config.get_name().split()
         ppins = self.printer.lookup_object("pins")
@@ -635,7 +773,7 @@ class TMCVirtualPinHelper:
             raise ppins.error("tmc virtual endstop only useful as endstop")
         if pin_params["invert"] or pin_params["pullup"]:
             raise ppins.error("Can not pullup/invert tmc virtual pin")
-        if self.diag_pin is None:
+        if self.diag_pin is None and not hasattr(self.mcu_tmc, "tmc_spi"):
             raise ppins.error("tmc virtual endstop requires diag pin config")
         # Setup for sensorless homing
         self.printer.register_event_handler(
@@ -644,60 +782,171 @@ class TMCVirtualPinHelper:
         self.printer.register_event_handler(
             "homing:homing_move_end", self.handle_homing_move_end
         )
-        self.mcu_endstop = ppins.setup_pin("endstop", self.diag_pin)
+        if self.diag_pin is None:
+            self.mcu_endstop = TMCSpiEndstop(self.printer, self.mcu_tmc)
+        else:
+            self.mcu_endstop = ppins.setup_pin("endstop", self.diag_pin)
         return self.mcu_endstop
+
+    def _set_field(self, field_name, value):
+        self._prev_state[field_name] = self.fields.get_field(field_name)
+        reg_name = self.fields.lookup_register(field_name)
+        self._dirty_regs[reg_name] = self.fields.set_field(field_name, value)
+
+    def _send_fields(self):
+        for reg, val in self._dirty_regs.items():
+            self.mcu_tmc.set_register(reg, val)
+        self._dirty_regs.clear()
 
     def handle_homing_move_begin(self, hmove):
         if self.mcu_endstop not in hmove.get_mcu_endstops():
             return
+        sg4_thrs = 0
+        if self.fields.lookup_register("sg4_thrs", None) is not None:
+            sg4_thrs = self.fields.get_field("sg4_thrs")
         # Enable/disable stealthchop
-        self.pwmthrs = self.fields.get_field("tpwmthrs")
         reg = self.fields.lookup_register("en_pwm_mode", None)
         if reg is None:
             # On "stallguard4" drivers, "stealthchop" must be enabled
-            self.en_pwm = not self.fields.get_field("en_spreadcycle")
-            tp_val = self.fields.set_field("tpwmthrs", 0)
-            self.mcu_tmc.set_register("TPWMTHRS", tp_val)
-            val = self.fields.set_field("en_spreadcycle", 0)
+            self._set_field("tpwmthrs", 0)
+            self._set_field("en_spreadcycle", 0)
+        elif sg4_thrs:
+            # TMC2240 using SG4, "stealthchop" must be enabled
+            self._set_field("en_pwm_mode", 1)
+            self._set_field("tpwmthrs", 0)
+            self._set_field(self.diag_pin_field, 1)
         else:
             # On earlier drivers, "stealthchop" must be disabled
-            self.en_pwm = self.fields.get_field("en_pwm_mode")
-            self.fields.set_field("en_pwm_mode", 0)
-            val = self.fields.set_field(self.diag_pin_field, 1)
-        self.mcu_tmc.set_register("GCONF", val)
+            self._set_field("en_pwm_mode", 0)
+            self._set_field(self.diag_pin_field, 1)
         # Enable tcoolthrs (if not already)
-        self.coolthrs = self.fields.get_field("tcoolthrs")
-        if self.coolthrs == 0:
-            tc_val = self.fields.set_field("tcoolthrs", 0xFFFFF)
-            self.mcu_tmc.set_register("TCOOLTHRS", tc_val)
+        if self.fields.get_field("tcoolthrs") == 0:
+            self._set_field("tcoolthrs", 0xFFFFF)
         # Disable thigh
         reg = self.fields.lookup_register("thigh", None)
         if reg is not None:
-            self.thigh = self.fields.get_field("thigh")
-            th_val = self.fields.set_field("thigh", 0)
-            self.mcu_tmc.set_register(reg, th_val)
+            self._set_field("thigh", 0)
+        self._send_fields()
 
     def handle_homing_move_end(self, hmove):
         if self.mcu_endstop not in hmove.get_mcu_endstops():
             return
-        # Restore stealthchop/spreadcycle
-        reg = self.fields.lookup_register("en_pwm_mode", None)
-        if reg is None:
-            tp_val = self.fields.set_field("tpwmthrs", self.pwmthrs)
-            self.mcu_tmc.set_register("TPWMTHRS", tp_val)
-            val = self.fields.set_field("en_spreadcycle", not self.en_pwm)
-        else:
-            self.fields.set_field("en_pwm_mode", self.en_pwm)
-            val = self.fields.set_field(self.diag_pin_field, 0)
-        self.mcu_tmc.set_register("GCONF", val)
-        # Restore tcoolthrs
-        tc_val = self.fields.set_field("tcoolthrs", self.coolthrs)
-        self.mcu_tmc.set_register("TCOOLTHRS", tc_val)
-        # Restore thigh
-        reg = self.fields.lookup_register("thigh", None)
-        if reg is not None:
-            th_val = self.fields.set_field("thigh", self.thigh)
-            self.mcu_tmc.set_register(reg, th_val)
+        # Restore previous state
+        for field, val in list(self._prev_state.items()):
+            self._set_field(field, val)
+        self._send_fields()
+        self._prev_state.clear()
+
+
+# Sensorless homing by polling the stallguard flag over spi
+class TMCSpiEndstop:
+    POLL_TIME = 0.001
+    # Stallguard needs some time at speed before its flag is valid
+    SETTLE_TIME = 0.150
+    # Matches MAX_DATA_LEN in src/tmc_spi_endstop.c
+    MAX_CHAIN_LEN = 8
+
+    def __init__(self, printer, mcu_tmc):
+        tmc_spi = mcu_tmc.tmc_spi
+        if tmc_spi.chain_len > self.MAX_CHAIN_LEN:
+            raise printer.config_error(
+                "Sensorless homing via SPI supports at most %d drivers"
+                " in a daisy chain" % (self.MAX_CHAIN_LEN,)
+            )
+        self._printer = printer
+        self._mutex = mcu_tmc.mutex
+        self._mcu_tmc = mcu_tmc
+        self._mcu = tmc_spi.get_mcu()
+        self._oid = self._mcu.create_oid()
+        self._dispatch = mcu.TriggerDispatch(self._mcu)
+        self._home_cmd = self._query_cmd = None
+        self._mcu.add_config_cmd(
+            "config_tmc_spi_endstop oid=%d spi_oid=%d data_len=%d"
+            " status_pos=%d"
+            % (
+                self._oid,
+                tmc_spi.spi.get_oid(),
+                tmc_spi.chain_len * 5,
+                (tmc_spi.chain_len - mcu_tmc.chain_pos) * 5,
+            )
+        )
+        self._mcu.add_config_cmd(
+            "tmc_spi_endstop_home oid=%d clock=0 rest_ticks=0"
+            " trsync_oid=0 trigger_reason=0" % (self._oid,),
+            on_restart=True,
+        )
+        self._mcu.register_config_callback(self._build_config)
+
+    def _build_config(self):
+        cmd_queue = self._dispatch.get_command_queue()
+        self._home_cmd = self._mcu.lookup_command(
+            "tmc_spi_endstop_home oid=%c clock=%u rest_ticks=%u"
+            " trsync_oid=%c trigger_reason=%c",
+            cq=cmd_queue,
+        )
+        self._query_cmd = self._mcu.lookup_query_command(
+            "tmc_spi_endstop_query_state oid=%c",
+            "tmc_spi_endstop_state oid=%c trigger_clock=%u",
+            oid=self._oid,
+            cq=cmd_queue,
+        )
+
+    def get_mcu(self):
+        return self._mcu
+
+    def add_stepper(self, stepper):
+        self._dispatch.add_stepper(stepper)
+
+    def get_steppers(self):
+        return self._dispatch.get_steppers()
+
+    def home_start(
+        self, print_time, sample_time, sample_count, rest_time, triggered=True
+    ):
+        toolhead = self._printer.lookup_object("toolhead")
+        accel = toolhead.get_max_velocity()[1]
+        speed = self.get_steppers()[0].get_step_dist() / rest_time
+        guard_time = speed / accel + self.SETTLE_TIME
+        # Host register reads must not interleave with the mcu polling
+        self._mutex.lock()
+        clock = self._mcu.print_time_to_clock(print_time + guard_time)
+        trigger_completion = self._dispatch.start(print_time)
+        self._home_cmd.send(
+            [
+                self._oid,
+                clock,
+                self._mcu.seconds_to_clock(self.POLL_TIME),
+                self._dispatch.get_oid(),
+                mcu.MCU_trsync.REASON_ENDSTOP_HIT,
+            ],
+            reqclock=clock,
+        )
+        return trigger_completion
+
+    def home_wait(self, home_end_time):
+        try:
+            self._dispatch.wait_end(home_end_time)
+            self._home_cmd.send([self._oid, 0, 0, 0, 0])
+        finally:
+            self._mutex.unlock()
+        res = self._dispatch.stop()
+        if res >= mcu.MCU_trsync.REASON_COMMS_TIMEOUT:
+            cmderr = self._printer.command_error
+            raise cmderr("Communication timeout during homing")
+        if res != mcu.MCU_trsync.REASON_ENDSTOP_HIT:
+            return 0.0
+        if self._mcu.is_fileoutput():
+            return home_end_time
+        params = self._query_cmd.send([self._oid])
+        clock = self._mcu.clock32_to_clock64(params["trigger_clock"])
+        return self._mcu.clock_to_print_time(clock)
+
+    def query_endstop(self, print_time):
+        if self._mcu.is_fileoutput():
+            return 0
+        status = self._mcu_tmc.get_register_raw("DRV_STATUS")["spi_status"]
+        # Ignore the stale stall flag at standstill
+        return status & 0x0C == 0x04
 
 
 ######################################################################

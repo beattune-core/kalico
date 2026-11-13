@@ -38,7 +38,7 @@ class FilamentWidthSensor:
         # Start adc
         self.ppins = self.printer.lookup_object("pins")
         self.mcu_adc = self.ppins.setup_pin("adc", self.pin)
-        self.mcu_adc.setup_minmax(ADC_SAMPLE_TIME, ADC_SAMPLE_COUNT)
+        self.mcu_adc.setup_adc_sample(ADC_SAMPLE_TIME, ADC_SAMPLE_COUNT)
         self.mcu_adc.setup_adc_callback(ADC_REPORT_TIME, self.adc_callback)
         # extrude factor updating
         self.extrude_factor_update_timer = self.reactor.register_timer(
@@ -144,7 +144,7 @@ class FilamentWidthSensor:
         self.filament_array = []
         gcmd.respond_info("Filament width measurements cleared!")
         # Set extrude multiplier to 100%
-        self.gcode.run_script_from_command("M221 S100")
+        gcmd.run_script("M221 S100")
 
     def cmd_M405(self, gcmd):
         response = "Filament width sensor Turned On"
@@ -171,7 +171,7 @@ class FilamentWidthSensor:
             # Clear filament array
             self.filament_array = []
             # Set extrude multiplier to 100%
-            self.gcode.run_script_from_command("M221 S100")
+            gcmd.run_script("M221 S100")
         gcmd.respond_info(response)
 
 
