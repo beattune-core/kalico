@@ -6,6 +6,7 @@
 import numpy as np
 import pytest
 
+from klippy.extras import shaper_defs
 from klippy.extras.shaper_calibrate import (
     CalibrationData,
     MAX_FREQ,
@@ -55,3 +56,71 @@ def test_explicit_shaper_freqs_not_extended():
     # Explicit ceiling of 145 Hz — should not be extended.
     best, _ = sc.find_best_shaper(cd, shaper_freqs=(None, 145.0, None))
     assert best.freq <= 145.0
+
+
+def _cfg(name):
+    return next(c for c in shaper_defs.INPUT_SHAPERS if c.name == name)
+
+
+def _fit(sc, cd, name, shaper_freqs=None, max_smoothing=None, max_freq=None):
+    return sc.fit_shaper(
+        _cfg(name), cd, shaper_freqs, None, None, max_smoothing, None, max_freq
+    )
+
+
+@pytest.mark.parametrize("name", ["zv", "mzv"])
+def test_fit_shaper_extends_each_shaper_past_ceiling(name):
+    sc = ShaperCalibrate(printer=None)
+    res = _fit(sc, _make_calibration_data(160.0), name)
+    assert MAX_SHAPER_FREQ < res.freq < MAX_FREQ
+
+
+def test_fit_shaper_unchanged_when_peak_well_below_ceiling():
+    sc = ShaperCalibrate(printer=None)
+    cd = _make_calibration_data(100.0)
+    auto = _fit(sc, cd, "mzv")
+    base = _fit(sc, cd, "mzv", shaper_freqs=(None, MAX_SHAPER_FREQ, None))
+    assert auto.freq == base.freq and auto.score == base.score
+
+
+def test_fit_shaper_explicit_end_disables_extension():
+    sc = ShaperCalibrate(printer=None)
+    res = _fit(
+        sc,
+        _make_calibration_data(160.0),
+        "zv",
+        shaper_freqs=(None, 145.0, None),
+    )
+    assert res.freq < 145.0
+
+
+def test_fit_shaper_explicit_list_disables_extension():
+    sc = ShaperCalibrate(printer=None)
+    res = _fit(
+        sc, _make_calibration_data(160.0), "zv", shaper_freqs=[120.0, 140.0]
+    )
+    assert res.freq in (120.0, 140.0)
+
+
+def test_fit_shaper_step_only_tuple_still_extends():
+    sc = ShaperCalibrate(printer=None)
+    res = _fit(
+        sc, _make_calibration_data(160.0), "zv", shaper_freqs=(None, None, 0.5)
+    )
+    assert res.freq > MAX_SHAPER_FREQ
+
+
+@pytest.mark.parametrize("max_freq", [152.0, 170.0])
+def test_fit_shaper_extension_capped_by_caller_max_freq(max_freq):
+    sc = ShaperCalibrate(printer=None)
+    cd = _make_calibration_data(160.0)
+    res = _fit(sc, cd, "zv", max_freq=max_freq)
+    assert res.freq < max_freq
+    assert len(res.vals) == int((cd.freq_bins <= max_freq).sum())
+
+
+def test_fit_shaper_extension_respects_max_smoothing():
+    sc = ShaperCalibrate(printer=None)
+    res = _fit(sc, _make_calibration_data(160.0), "mzv", max_smoothing=0.05)
+    assert res.freq > MAX_SHAPER_FREQ
+    assert res.smoothing <= 0.05

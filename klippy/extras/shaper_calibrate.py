@@ -278,8 +278,16 @@ class ShaperCalibrate:
         test_damping_ratios = test_damping_ratios or TEST_DAMPING_RATIOS
         scv = scv or 5.0
 
+        # Extend the scan above MAX_SHAPER_FREQ when the result presses
+        # against the ceiling, unless the caller fixed the range explicitly.
+        extend = not shaper_freqs or (
+            isinstance(shaper_freqs, tuple) and shaper_freqs[1] is None
+        )
+        cap = min(max_freq or MAX_FREQ, MAX_FREQ)
+
         if not shaper_freqs:
             shaper_freqs = (None, None, None)
+        freq_end = MAX_SHAPER_FREQ
         if isinstance(shaper_freqs, tuple):
             freq_end = shaper_freqs[1] or MAX_SHAPER_FREQ
             freq_start = min(
@@ -296,15 +304,61 @@ class ShaperCalibrate:
         psd = calibration_data.psd_sum[freq_bins <= max_freq]
         freq_bins = freq_bins[freq_bins <= max_freq]
 
-        best_res = None
+        results, stopped = self._evaluate_freqs(
+            shaper_cfg,
+            test_freqs,
+            freq_bins,
+            psd,
+            damping_ratio,
+            scv,
+            max_smoothing,
+            test_damping_ratios,
+        )
+        selected = self._select_result(results, stopped)
+        ceiling = freq_end
+        while (
+            extend
+            and selected.freq >= ceiling - SHAPER_FREQ_CEILING_TRIGGER
+            and ceiling < cap
+        ):
+            new_ceiling = min(ceiling + SHAPER_FREQ_CEILING_STEP, cap)
+            band = np.arange(ceiling, new_ceiling, freq_step)
+            band_results, band_stopped = self._evaluate_freqs(
+                shaper_cfg,
+                band,
+                freq_bins,
+                psd,
+                damping_ratio,
+                scv,
+                max_smoothing,
+                test_damping_ratios,
+            )
+            results = band_results + results
+            stopped = stopped or band_stopped
+            selected = self._select_result(results, stopped)
+            ceiling = new_ceiling
+        return selected
+
+    def _evaluate_freqs(
+        self,
+        shaper_cfg,
+        test_freqs,
+        freq_bins,
+        psd,
+        damping_ratio,
+        scv,
+        max_smoothing,
+        test_damping_ratios,
+    ):
+        np = self.numpy
         results = []
         for test_freq in test_freqs[::-1]:
             shaper_vibrations = 0.0
             shaper_vals = np.zeros(shape=freq_bins.shape)
             shaper = shaper_cfg.init_func(test_freq, damping_ratio)
             shaper_smoothing = self._get_shaper_smoothing(shaper, scv=scv)
-            if max_smoothing and shaper_smoothing > max_smoothing and best_res:
-                return best_res
+            if max_smoothing and shaper_smoothing > max_smoothing and results:
+                return results, True
             # Exact damping ratio of the printer is unknown, pessimizing
             # remaining vibrations over possible damping values
             for dr in test_damping_ratios:
@@ -332,9 +386,17 @@ class ShaperCalibrate:
                     max_accel=max_accel,
                 )
             )
-            if best_res is None or best_res.vibrs > results[-1].vibrs:
+        return results, False
+
+    def _select_result(self, results, stopped_early):
+        # `results` is ordered from high to low frequency
+        best_res = None
+        for res in results:
+            if best_res is None or best_res.vibrs > res.vibrs:
                 # The current frequency is better for the shaper.
-                best_res = results[-1]
+                best_res = res
+        if stopped_early:
+            return best_res
         # Try to find an 'optimal' shapper configuration: the one that is not
         # much worse than the 'best' one, but gives much less smoothing
         selected = best_res
