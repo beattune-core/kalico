@@ -116,6 +116,7 @@ def test_fit_shaper_extension_capped_by_caller_max_freq(max_freq):
     cd = _make_calibration_data(160.0)
     res = _fit(sc, cd, "zv", max_freq=max_freq)
     assert res.freq < max_freq
+    assert res.freq > MAX_SHAPER_FREQ
     assert len(res.vals) == int((cd.freq_bins <= max_freq).sum())
 
 
@@ -128,7 +129,7 @@ def test_fit_shaper_extension_respects_max_smoothing():
 
 def test_find_best_shaper_extends_non_winning_shapers():
     sc = ShaperCalibrate(printer=None)
-    best, all_shapers = sc.find_best_shaper(_make_calibration_data(160.0))
+    _, all_shapers = sc.find_best_shaper(_make_calibration_data(160.0))
     by_name = {s.name: s for s in all_shapers}
     assert by_name["zv"].freq > MAX_SHAPER_FREQ
     assert by_name["mzv"].freq > MAX_SHAPER_FREQ
