@@ -271,6 +271,7 @@ class ShaperCalibrate:
         max_smoothing,
         test_damping_ratios,
         max_freq,
+        excited_freq=None,
     ):
         np = self.numpy
 
@@ -284,6 +285,8 @@ class ShaperCalibrate:
             isinstance(shaper_freqs, tuple) and shaper_freqs[1] is None
         )
         cap = min(max_freq or MAX_FREQ, MAX_FREQ)
+        if excited_freq is not None:
+            cap = min(cap, excited_freq)
 
         if not shaper_freqs:
             shaper_freqs = (None, None, None)
@@ -446,6 +449,7 @@ class ShaperCalibrate:
         test_damping_ratios=None,
         max_freq=None,
         logger=None,
+        excited_freq=None,
     ):
         best_shaper = None
         all_shapers = []
@@ -464,6 +468,7 @@ class ShaperCalibrate:
                     max_smoothing,
                     test_damping_ratios,
                     max_freq,
+                    excited_freq,
                 ),
             )
             if logger is not None:

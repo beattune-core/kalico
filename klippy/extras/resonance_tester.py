@@ -587,6 +587,7 @@ class ResonanceTester:
                 max_smoothing=max_smoothing,
                 scv=scv,
                 max_freq=max_freq,
+                excited_freq=self.generator.get_max_freq(),
                 logger=gcmd.respond_info,
             )
             gcmd.respond_info(

@@ -62,10 +62,48 @@ def _cfg(name):
     return next(c for c in shaper_defs.INPUT_SHAPERS if c.name == name)
 
 
-def _fit(sc, cd, name, shaper_freqs=None, max_smoothing=None, max_freq=None):
+def _fit(
+    sc,
+    cd,
+    name,
+    shaper_freqs=None,
+    max_smoothing=None,
+    max_freq=None,
+    excited_freq=None,
+):
     return sc.fit_shaper(
-        _cfg(name), cd, shaper_freqs, None, None, max_smoothing, None, max_freq
+        _cfg(name),
+        cd,
+        shaper_freqs,
+        None,
+        None,
+        max_smoothing,
+        None,
+        max_freq,
+        excited_freq,
     )
+
+
+def test_fit_shaper_no_extension_when_excited_range_below_ceiling():
+    sc = ShaperCalibrate(printer=None)
+    res = _fit(sc, _make_calibration_data(160.0), "zv", excited_freq=135.0)
+    assert res.freq < MAX_SHAPER_FREQ
+
+
+def test_fit_shaper_extension_capped_by_excited_freq():
+    sc = ShaperCalibrate(printer=None)
+    cd = _make_calibration_data(160.0)
+    res = _fit(sc, cd, "zv", max_freq=202.5, excited_freq=155.0)
+    assert MAX_SHAPER_FREQ < res.freq < 155.0
+    assert len(res.vals) == int((cd.freq_bins <= 202.5).sum())
+
+
+def test_find_best_shaper_forwards_excited_freq():
+    sc = ShaperCalibrate(printer=None)
+    _, all_shapers = sc.find_best_shaper(
+        _make_calibration_data(160.0), max_freq=202.5, excited_freq=135.0
+    )
+    assert all(s.freq < MAX_SHAPER_FREQ for s in all_shapers)
 
 
 @pytest.mark.parametrize("name", ["zv", "mzv"])
