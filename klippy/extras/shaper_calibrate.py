@@ -15,6 +15,8 @@ MIN_FREQ = 5.0
 MAX_FREQ = 200.0
 WINDOW_T_SEC = 0.5
 MAX_SHAPER_FREQ = 150.0
+SHAPER_FREQ_CEILING_STEP = 25.0
+SHAPER_FREQ_CEILING_TRIGGER = 2.0
 
 TEST_DAMPING_RATIOS = [0.075, 0.1, 0.15]
 
@@ -442,11 +444,22 @@ class ShaperCalibrate:
         max_freq,
         estimate_shaper,
         get_shaper_smoothing,
+        excited_freq=None,
     ):
         np = self.numpy
 
         damping_ratio = damping_ratio or shaper_defs.DEFAULT_DAMPING_RATIO
         test_damping_ratios = test_damping_ratios or TEST_DAMPING_RATIOS
+        scv = scv or 5.0
+
+        # Extend the scan above MAX_SHAPER_FREQ when the result presses
+        # against the ceiling, unless the caller fixed the range explicitly.
+        extend = not shaper_freqs or (
+            isinstance(shaper_freqs, tuple) and shaper_freqs[1] is None
+        )
+        cap = min(max_freq or MAX_FREQ, MAX_FREQ)
+        if excited_freq is not None:
+            cap = min(cap, excited_freq)
 
         shaper = shaper_cfg.init_func(1.0, damping_ratio)
 
@@ -460,6 +473,7 @@ class ShaperCalibrate:
 
         if not shaper_freqs:
             shaper_freqs = (None, None, None)
+        freq_end = MAX_SHAPER_FREQ
         if isinstance(shaper_freqs, tuple):
             freq_end = shaper_freqs[1] or MAX_SHAPER_FREQ
             freq_start = min(
@@ -476,13 +490,65 @@ class ShaperCalibrate:
         psd = calibration_data.psd_sum[freq_bins <= max_freq]
         freq_bins = freq_bins[freq_bins <= max_freq]
 
-        best_res = None
+        results, stopped = self._evaluate_freqs(
+            shaper_cfg,
+            test_freqs,
+            freq_bins,
+            psd,
+            damping_ratio,
+            scv,
+            max_smoothing,
+            test_freq_bins,
+            test_shaper_vals,
+            get_shaper_smoothing,
+        )
+        selected = self._select_result(results, stopped)
+        ceiling = freq_end
+        while (
+            extend
+            and selected.freq >= ceiling - SHAPER_FREQ_CEILING_TRIGGER
+            and ceiling < cap
+        ):
+            new_ceiling = min(ceiling + SHAPER_FREQ_CEILING_STEP, cap)
+            band = np.arange(ceiling, new_ceiling, freq_step)
+            band_results, band_stopped = self._evaluate_freqs(
+                shaper_cfg,
+                band,
+                freq_bins,
+                psd,
+                damping_ratio,
+                scv,
+                max_smoothing,
+                test_freq_bins,
+                test_shaper_vals,
+                get_shaper_smoothing,
+            )
+            results = band_results + results
+            stopped = stopped or band_stopped
+            selected = self._select_result(results, stopped)
+            ceiling = new_ceiling
+        return selected
+
+    def _evaluate_freqs(
+        self,
+        shaper_cfg,
+        test_freqs,
+        freq_bins,
+        psd,
+        damping_ratio,
+        scv,
+        max_smoothing,
+        test_freq_bins,
+        test_shaper_vals,
+        get_shaper_smoothing,
+    ):
+        np = self.numpy
         results = []
         for test_freq in test_freqs[::-1]:
             shaper = shaper_cfg.init_func(test_freq, damping_ratio)
             shaper_smoothing = get_shaper_smoothing(shaper, scv=scv)
-            if max_smoothing and shaper_smoothing > max_smoothing and best_res:
-                return best_res
+            if max_smoothing and shaper_smoothing > max_smoothing and results:
+                return results, True
             shaper_vals = np.interp(
                 freq_bins, test_freq_bins * test_freq, test_shaper_vals
             )
@@ -510,9 +576,17 @@ class ShaperCalibrate:
                     max_accel=max_accel,
                 )
             )
-            if best_res is None or best_res.vibrs > results[-1].vibrs:
+        return results, False
+
+    def _select_result(self, results, stopped_early):
+        # `results` is ordered from high to low frequency
+        best_res = None
+        for res in results:
+            if best_res is None or best_res.vibrs > res.vibrs:
                 # The current frequency is better for the shaper.
-                best_res = results[-1]
+                best_res = res
+        if stopped_early:
+            return best_res
         # Try to find an 'optimal' shapper configuration: the one that is not
         # much worse than the 'best' one, but gives much less smoothing
         selected = best_res
@@ -565,6 +639,7 @@ class ShaperCalibrate:
         test_damping_ratios=None,
         max_freq=None,
         logger=None,
+        excited_freq=None,
     ):
         best_shaper = None
         all_shapers = []
@@ -585,6 +660,7 @@ class ShaperCalibrate:
                     max_freq,
                     estimate_smoother,
                     self._get_smoother_smoothing,
+                    excited_freq,
                 ),
             )
             if logger is not None:
@@ -633,6 +709,7 @@ class ShaperCalibrate:
                     max_freq,
                     estimate_shaper,
                     self._get_shaper_smoothing,
+                    excited_freq,
                 ),
             )
             if logger is not None:
