@@ -2412,6 +2412,10 @@ section of the measuring resonances guide for more information on
 #   Minimum frequency to test for resonances. The default is 5 Hz.
 #max_freq: 133.33
 #   Maximum frequency to test for resonances. The default is 133.33 Hz.
+#   Input shaper fitting scans up to 150 Hz and automatically extends,
+#   up to 200 Hz or the tested max_freq (FREQ_END), whichever is lower,
+#   for shapers and smoothers whose best frequency reaches that limit. Set
+#   max_freq above 150 on printers with high resonance frequencies.
 #accel_per_hz: 75
 #   This parameter is used to determine which acceleration to use to
 #   test a specific frequency: accel = accel_per_hz * freq. Higher the
